@@ -1,1 +1,553 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Gravity Hole - 4 Directions Survival</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0b0c10;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #ffffff;
+            touch-action: none;
+        }
+        #gameCanvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at center, #1f2833 0%, #0b0c10 100%);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Responsive & Fullscreen canvas sizing
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Game States
+        const STATE = {
+            START: 'START',
+            PLAYING: 'PLAYING',
+            GAMEOVER: 'GAMEOVER'
+        };
+        let gameState = STATE.START;
+
+        // Score & Storage
+        let score = 0;
+        let bestScore = localStorage.getItem('gravity_hole_best') || 0;
+        let elapsedTime = 0;
+
+        // Black Hole
+        let blackHole = {
+            x: 0,
+            y: 0,
+            radius: 0,
+            pulse: 0
+        };
+
+        function updateBlackHoleMetrics() {
+            blackHole.x = canvas.width / 2;
+            blackHole.y = canvas.height / 2;
+            blackHole.radius = canvas.width * 0.05; // 10% width diameter
+        }
+        updateBlackHoleMetrics();
+
+        // Player Class
+        class Player {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                this.radius = Math.max(10, canvas.width * 0.02);
+                this.x = canvas.width * 0.5;
+                this.y = canvas.height * 0.85;
+                this.vx = 0;
+                this.vy = 0;
+                this.zone = 'RED';
+                this.isGrounded = false;
+                this.jumpCount = 0;
+                this.maxJumps = 2;
+            }
+
+            update(dt) {
+                // Determine current zone based on position relative to center
+                this.determineZone();
+
+                // Gravity and Movement physics vectors based on zone
+                let gravAcc = 600; // pixels per sec^2
+                let gVec = { x: 0, y: 0 };
+
+                if (this.zone === 'RED') gVec = { x: 0, y: 1 };
+                else if (this.zone === 'GREEN') gVec = { x: -1, y: 0 };
+                else if (this.zone === 'YELLOW') gVec = { x: 0, y: -1 };
+                else if (this.zone === 'PURPLE') gVec = { x: 1, y: 0 };
+
+                // Apply gravity acceleration
+                this.vx += gVec.x * gravAcc * dt;
+                this.vy += gVec.y * gravAcc * dt;
+
+                // Air resistance / friction
+                this.vx *= Math.pow(0.1, dt);
+                this.vy *= Math.pow(0.1, dt);
+
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+
+                // Boundaries collision (Screen edges act as ground for each zone)
+                let margin = this.radius;
+                if (this.y > canvas.height - margin) {
+                    this.y = canvas.height - margin;
+                    if (this.zone === 'RED') { this.vy = 0; this.isGrounded = true; this.jumpCount = 0; }
+                }
+                if (this.y < margin) {
+                    this.y = margin;
+                    if (this.zone === 'YELLOW') { this.vy = 0; this.isGrounded = true; this.jumpCount = 0; }
+                }
+                if (this.x < margin) {
+                    this.x = margin;
+                    if (this.zone === 'GREEN') { this.vx = 0; this.isGrounded = true; this.jumpCount = 0; }
+                }
+                if (this.x > canvas.width - margin) {
+                    this.x = canvas.width - margin;
+                    if (this.zone === 'PURPLE') { this.vx = 0; this.isGrounded = true; this.jumpCount = 0; }
+                }
+            }
+
+            determineZone() {
+                let dx = this.x - blackHole.x;
+                let dy = this.y - blackHole.y;
+
+                // Divide space into 4 diagonal quadrants
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    this.zone = dx > 0 ? 'PURPLE' : 'GREEN';
+                } else {
+                    this.zone = dy > 0 ? 'RED' : 'YELLOW';
+                }
+            }
+
+            jump(chargeRatio) {
+                if (this.jumpCount < this.maxJumps) {
+                    let minPower = 300;
+                    let maxPower = canvas.width * 0.7;
+                    let power = minPower + (maxPower - minPower) * chargeRatio;
+
+                    let jVec = { x: 0, y: 0 };
+                    if (this.zone === 'RED') jVec = { x: 0, y: -1 };
+                    else if (this.zone === 'GREEN') jVec = { x: 1, y: 0 };
+                    else if (this.zone === 'YELLOW') jVec = { x: 0, y: 1 };
+                    else if (this.zone === 'PURPLE') jVec = { x: -1, y: 0 };
+
+                    this.vx = jVec.x * power;
+                    this.vy = jVec.y * power;
+                    this.jumpCount++;
+                    this.isGrounded = false;
+
+                    // Spawn jump particles
+                    particleSystem.spawnBurst(this.x, this.y, this.zone);
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                // Color based on zone
+                let col = '#e94560';
+                if (this.zone === 'GREEN') col = '#00b4d8';
+                else if (this.zone === 'YELLOW') col = '#ffb703';
+                else if (this.zone === 'PURPLE') col = '#9b5de5';
+
+                ctx.fillStyle = col;
+                ctx.shadowBlur = 12;
+                ctx.shadowColor = col;
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Inner detail
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius * 0.4, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.restore();
+            }
+        }
+
+        // Obstacle Manager
+        class ObstacleManager {
+            constructor() {
+                this.obstacles = [];
+                this.spawnTimer = 0;
+                this.spawnInterval = 1.5;
+            }
+
+            reset() {
+                this.obstacles = [];
+                this.spawnTimer = 0;
+                this.spawnInterval = 1.5;
+            }
+
+            update(dt, difficulty) {
+                this.spawnTimer += dt;
+                let currentInterval = Math.max(0.5, this.spawnInterval / difficulty);
+
+                if (this.spawnTimer >= currentInterval) {
+                    this.spawnTimer = 0;
+                    this.spawnRandomObstacle();
+                }
+
+                let speed = (canvas.width * 0.25) * difficulty;
+
+                for (let i = this.obstacles.length - 1; i >= 0; i--) {
+                    let obs = this.obstacles[i];
+                    obs.x += obs.vx * speed * dt;
+                    obs.y += obs.vy * speed * dt;
+
+                    // Remove if out of bounds
+                    if (obs.x < -200 || obs.x > canvas.width + 200 || obs.y < -200 || obs.y > canvas.height + 200) {
+                        this.obstacles.splice(i, 1);
+                    }
+                }
+            }
+
+            spawnRandomObstacle() {
+                const zones = ['RED', 'GREEN', 'YELLOW', 'PURPLE'];
+                let zone = zones[Math.floor(Math.random() * zones.length)];
+
+                let length = canvas.width * (0.08 + Math.random() * 0.2);
+                let thickness = canvas.width * 0.025;
+                let obs = { x: 0, y: 0, w: 0, h: 0, vx: 0, vy: 0, zone: zone };
+
+                if (zone === 'RED') {
+                    obs.w = length;
+                    obs.h = thickness;
+                    obs.x = canvas.width + obs.w;
+                    obs.y = canvas.height * (0.6 + Math.random() * 0.35);
+                    obs.vx = -1;
+                    obs.vy = 0;
+                } else if (zone === 'YELLOW') {
+                    obs.w = length;
+                    obs.h = thickness;
+                    obs.x = -obs.w;
+                    obs.y = canvas.height * (0.05 + Math.random() * 0.35);
+                    obs.vx = 1;
+                    obs.vy = 0;
+                } else if (zone === 'GREEN') {
+                    obs.w = thickness;
+                    obs.h = length;
+                    obs.x = canvas.width * (0.05 + Math.random() * 0.35);
+                    obs.y = canvas.height + obs.h;
+                    obs.vx = 0;
+                    obs.vy = -1;
+                } else if (zone === 'PURPLE') {
+                    obs.w = thickness;
+                    obs.h = length;
+                    obs.x = canvas.width * (0.6 + Math.random() * 0.35);
+                    obs.y = -obs.h;
+                    obs.vx = 0;
+                    obs.vy = 1;
+                }
+
+                // Avoid spawning directly on top of the center black hole
+                this.obstacles.push(obs);
+            }
+
+            draw() {
+                for (let obs of this.obstacles) {
+                    ctx.save();
+                    ctx.fillStyle = '#ff4d6d';
+                    ctx.shadowBlur = 8;
+                    ctx.shadowColor = '#ff4d6d';
+                    ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+                    ctx.restore();
+                }
+            }
+        }
+
+        // Particle System
+        class ParticleSystem {
+            constructor() {
+                this.particles = [];
+            }
+
+            reset() {
+                this.particles = [];
+            }
+
+            spawnBurst(x, y, zone) {
+                for (let i = 0; i < 12; i++) {
+                    let angle = Math.random() * Math.PI * 2;
+                    let speed = 50 + Math.random() * 100;
+                    this.particles.push({
+                        x: x,
+                        y: y,
+                        vx: Math.cos(angle) * speed,
+                        vy: Math.sin(angle) * speed,
+                        alpha: 1,
+                        decay: 1.5 + Math.random() * 2,
+                        radius: 2 + Math.random() * 2
+                    });
+                }
+            }
+
+            update(dt) {
+                for (let i = this.particles.length - 1; i >= 0; i--) {
+                    let p = this.particles[i];
+                    p.x += p.vx * dt;
+                    p.y += p.vy * dt;
+                    p.alpha -= p.decay * dt;
+                    if (p.alpha <= 0) {
+                        this.particles.splice(i, 1);
+                    }
+                }
+            }
+
+            draw() {
+                for (let p of this.particles) {
+                    ctx.save();
+                    ctx.globalAlpha = p.alpha;
+                    ctx.fillStyle = '#00f5d4';
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }
+            }
+        }
+
+        // Initialize Systems
+        const player = new Player();
+        const obstacleManager = new ObstacleManager();
+        const particleSystem = new ParticleSystem();
+
+        // Input Management
+        let isHolding = false;
+        let holdStartTime = 0;
+        let holdDuration = 0;
+
+        function handleTouchStart(e) {
+            if (gameState === STATE.START || gameState === STATE.GAMEOVER) {
+                startGame();
+                e.preventDefault();
+                return;
+            }
+            if (gameState === STATE.PLAYING && !isHolding) {
+                isHolding = true;
+                holdStartTime = performance.now();
+                holdDuration = 0;
+            }
+            e.preventDefault();
+        }
+
+        function handleTouchEnd(e) {
+            if (gameState === STATE.PLAYING && isHolding) {
+                isHolding = false;
+                let chargeRatio = Math.min(1, holdDuration / 1.0);
+                player.jump(chargeRatio);
+                holdDuration = 0;
+            }
+            e.preventDefault();
+        }
+
+        window.addEventListener('mousedown', handleTouchStart);
+        window.addEventListener('mouseup', handleTouchEnd);
+        window.addEventListener('touchstart', handleTouchStart, { passive: false });
+        window.addEventListener('touchend', handleTouchEnd, { passive: false });
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                if (gameState !== STATE.PLAYING) startGame();
+                else if (!isHolding) {
+                    isHolding = true;
+                    holdStartTime = performance.now();
+                    holdDuration = 0;
+                }
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            if (e.code === 'Space' && isHolding) {
+                isHolding = false;
+                let chargeRatio = Math.min(1, holdDuration / 1.0);
+                player.jump(chargeRatio);
+                holdDuration = 0;
+            }
+        });
+
+        function startGame() {
+            score = 0;
+            elapsedTime = 0;
+            player.reset();
+            obstacleManager.reset();
+            particleSystem.reset();
+            gameState = STATE.PLAYING;
+        }
+
+        // Collision Check (Circle vs Rectangle)
+        function checkCollision() {
+            // Black hole collision check
+            let distToHole = Math.hypot(player.x - blackHole.x, player.y - blackHole.y);
+            if (distToHole < blackHole.radius * 0.85) {
+                return true;
+            }
+
+            // Obstacle collision check
+            for (let obs of obstacleManager.obstacles) {
+                let closestX = Math.max(obs.x, Math.min(player.x, obs.x + obs.w));
+                let closestY = Math.max(obs.y, Math.min(player.y, obs.y + obs.h));
+                let distance = Math.hypot(player.x - closestX, player.y - closestY);
+                if (distance < player.radius) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Main Game Loop
+        let lastTime = performance.now();
+
+        function gameLoop(now) {
+            let dt = (now - lastTime) / 1000;
+            if (dt > 0.1) dt = 0.1; // Cap delta time
+            lastTime = now;
+
+            updateBlackHoleMetrics();
+
+            // Update Input Hold Time
+            if (isHolding) {
+                holdDuration = (now - holdStartTime) / 1000;
+            }
+
+            // Game Logic Updates
+            if (gameState === STATE.PLAYING) {
+                elapsedTime += dt;
+                score = Math.floor(elapsedTime * 10);
+                let difficulty = 1 + elapsedTime / 30;
+
+                player.update(dt);
+                obstacleManager.update(dt, difficulty);
+                particleSystem.update(dt);
+
+                if (checkCollision()) {
+                    gameState = STATE.GAMEOVER;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        localStorage.setItem('gravity_hole_best', bestScore);
+                    }
+                }
+            }
+
+            // Render Graphics
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Zone Dividing Lines (Subtle)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, 0); ctx.lineTo(canvas.width, canvas.height);
+            ctx.moveTo(canvas.width, 0); ctx.lineTo(0, canvas.height);
+            ctx.stroke();
+
+            // Draw Black Hole Center
+            blackHole.pulse = (Math.sin(now * 0.005) + 1) * 0.5;
+            let grad = ctx.createRadialGradient(blackHole.x, blackHole.y, 0, blackHole.x, blackHole.y, blackHole.radius * (1 + blackHole.pulse * 0.1));
+            grad.addColorStop(0, '#000000');
+            grad.addColorStop(0.7, '#111122');
+            grad.addColorStop(1, 'rgba(155, 93, 229, 0.3)');
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(blackHole.x, blackHole.y, blackHole.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw Game Elements
+            obstacleManager.draw();
+            particleSystem.draw();
+            if (gameState === STATE.PLAYING) {
+                player.draw();
+            }
+
+            // Draw Charge Indicator Circle around Player
+            if (isHolding && gameState === STATE.PLAYING) {
+                let charge = Math.min(1, holdDuration / 1.0);
+                ctx.strokeStyle = '#00f5d4';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.radius + 6 + (charge * 15), 0, Math.PI * 2 * charge);
+                ctx.stroke();
+            }
+
+            // Draw UI Overlays
+            if (gameState === STATE.START) {
+                ctx.fillStyle = 'rgba(11, 12, 16, 0.85)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#00f5d4';
+                ctx.font = `bold ${Math.max(24, canvas.width * 0.08)}px sans-serif`;
+                ctx.fillText('GRAVITY HOLE', canvas.width / 2, canvas.height * 0.35);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = `${Math.max(14, canvas.width * 0.04)}px sans-serif`;
+                ctx.fillText('Survive the 4 Gravities', canvas.width / 2, canvas.height * 0.42);
+
+                ctx.fillStyle = '#e94560';
+                ctx.font = `bold ${Math.max(16, canvas.width * 0.05)}px sans-serif`;
+                ctx.fillText('[ TAP & HOLD TO START ]', canvas.width / 2, canvas.height * 0.60);
+
+                ctx.fillStyle = '#8c7ae6';
+                ctx.font = `${Math.max(12, canvas.width * 0.032)}px sans-serif`;
+                ctx.fillText('Hold to charge jump • Max 2 Jumps', canvas.width / 2, canvas.height * 0.68);
+            } else if (gameState === STATE.PLAYING) {
+                ctx.textAlign = 'left';
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 20px sans-serif';
+                ctx.fillText(`SCORE: ${score}`, 24, 40);
+            } else if (gameState === STATE.GAMEOVER) {
+                ctx.fillStyle = 'rgba(11, 12, 16, 0.9)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#ff4d6d';
+                ctx.font = `bold ${Math.max(28, canvas.width * 0.09)}px sans-serif`;
+                ctx.fillText('GAME OVER', canvas.width / 2, canvas.height * 0.35);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = `${Math.max(16, canvas.width * 0.05)}px sans-serif`;
+                ctx.fillText(`SCORE: ${score}`, canvas.width / 2, canvas.height * 0.47);
+                ctx.fillText(`BEST: ${bestScore}`, canvas.width / 2, canvas.height * 0.54);
+
+                ctx.fillStyle = '#00f5d4';
+                ctx.font = `bold ${Math.max(18, canvas.width * 0.055)}px sans-serif`;
+                ctx.fillText('[ TAP TO PLAY AGAIN ]', canvas.width / 2, canvas.height * 0.70);
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
 
