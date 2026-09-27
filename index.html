@@ -52,6 +52,9 @@
   .card ul{margin:0 0 10px;padding-left:18px;font-size:13.5px;line-height:1.5}
   .card .legend{display:flex;gap:14px;font-size:13px;margin-bottom:6px}
   .card .legend i{display:inline-block;width:18px;height:0;border-top:4px dotted;vertical-align:middle;margin-right:6px}
+  #demo{display:block;width:100%;height:auto;aspect-ratio:300/120;border-radius:8px;background:rgba(255,255,255,.04)}
+  .demoCaption{display:flex;justify-content:center;gap:8px;margin-top:6px;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.01em}
+  .demoCaption span{color:var(--ink)}
   .card button{
     pointer-events:auto;margin-top:12px;width:100%;font:inherit;font-weight:700;font-size:16px;
     padding:13px;border:2px solid var(--ink);border-radius:10px;background:var(--accent);color:var(--paper);cursor:pointer;
@@ -81,13 +84,10 @@
 <div class="ov" id="ov">
   <div class="card">
     <h1 id="ovTitle">Rooftop Leap</h1>
-    <p id="ovMsg">Touch and drag right to charge power (drag left to reduce), release to jump.</p>
+    <p id="ovMsg">Drag to charge, release to jump. Roof to roof — don't hit a wall or fall.</p>
     <div id="ovBody">
-      <ul>
-        <li>Drag sideways: the longer the drag, the more power. You can still charge in mid-air for the next jump.</li>
-        <li>Landing on a roof launches you again immediately. Not touching the screen at that moment means game over.</li>
-        <li>Clip a wall and you'll bounce off it — recover if you land on a roof, or fall into the gap and it's game over.</li>
-      </ul>
+      <canvas id="demo" width="300" height="120"></canvas>
+      <div class="demoCaption"><span>Hold</span>→<span>Release</span>→<span>Land</span></div>
     </div>
     <button id="again" hidden>Play again</button>
 
@@ -131,6 +131,7 @@
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
   const canvas = $('c'), ctx = canvas.getContext('2d');
+  const demoCanvas = $('demo'), dctx = demoCanvas ? demoCanvas.getContext('2d') : null;
   const elDist = $('dist'), elBest = $('best'), elFill = $('fill'), elRead = $('readout');
   const ov = $('ov'), ovTitle = $('ovTitle'), ovMsg = $('ovMsg'), ovBody = $('ovBody'), btnAgain = $('again');
 
@@ -145,8 +146,13 @@
   let P;                          // {x, y, vx, vy}  (y = độ cao chân)
   let grounded, charging, hold, pending, maxX, camX, camY, landT, wallT, deadT, lastRoof;
   let hitWall = false, bounceCount = 0;
+  let demoT = 0;
+  let curB = null;               // toà nhà nhân vật đang đứng/đi bộ trên đó
+  const WALK_SPEED = 3.0;        // m/s — tốc độ đi bộ trên mái nhà
+  let walkedOff = false;         // rơi do đi bộ hết mép (để phân biệt lý do thua với nhảy hụt)
+  let hitUFO = false;            // rơi do đâm đầu vào đĩa bay
   let activeId = null, keyMode = false, dragX0 = 0, dragY0 = 0, dragX = 0;
-  let buildings, bid, particles, lastTime = 0, acc = 0;
+  let buildings, bid, particles, ufos, uid = 0, lastTime = 0, acc = 0;
 
   const COL = {
     paper:'#0b1220', ink:'#e7edf5', good:'#35c98c', bad:'#ff6767', accent:'#3fa9f5', void:'#04070c', hint:'#3fa9f5'
@@ -190,19 +196,33 @@
 
       const lo = Math.max(1.4, 3.2 - d / 80), hi = Math.max(lo + 0.6, 4.8 - d / 50);
       const w = rand(lo, hi);
+      const prevH = last.h;
       last = { x0: d + gap, x1: d + gap + w, h, id: bid++ };
       buildings.push(last);
+
+      // đĩa bay ngẫu nhiên trong bầu trời phía trên, tỉ lệ xuất hiện thấp (~14%)
+      if (Math.random() < 0.14){
+        ufos.push({
+          x: d + rand(-1.5, gap + w * 0.7),
+          y: Math.max(prevH, h) + rand(3, 10),
+          r: rand(0.75, 1.05),
+          alive: true, vx: 0, vy: 0, rot: 0, rotSpeed: 0, phase: rand(0, Math.PI * 2),
+          id: uid++
+        });
+      }
     }
   }
 
   function reset(){
-    bid = 0;
+    bid = 0; uid = 0;
     buildings = [{ x0: -12, x1: 5, h: 6, id: bid++ }];
+    ufos = [];
     genAhead(0);
     P = { x: 0, y: 6, vx: 0, vy: 0 };
-    lastRoof = 6;
+    lastRoof = 6; curB = buildings[0];
     grounded = true; charging = false; hold = 0; pending = null; maxX = 0; landT = 0; wallT = 0; deadT = 0;
     hitWall = false; bounceCount = 0;
+    demoT = 0; walkedOff = false; hitUFO = false;
     activeId = null; keyMode = false;
     particles = [];
     camX = P.x - viewW * 0.28; camY = P.y;
@@ -266,7 +286,7 @@
     const v = speedFor(h);
     P.vx = v * Math.cos(ANG);
     P.vy = v * Math.sin(ANG);
-    grounded = false;
+    grounded = false; walkedOff = false;
   }
   // Tích lực bằng thao tác kéo ngang: chạm điểm đầu, kéo sang phải để tăng, kéo về trái để giảm.
   // Có thể tích cả khi đang bay: lực tích trên không được dùng ngay khi chạm nóc nhà.
@@ -280,6 +300,7 @@
     if (state === 'dead' || charging) return false;
     if (state === 'ready'){ state = 'playing'; ov.hidden = true; }
     charging = true; hold = T_MIN; pending = null;
+    // Nhân vật vẫn tiếp tục đi bộ bình thường trong lúc tích lực, không đứng khựng lại.
     return true;
   }
   function release(){
@@ -335,7 +356,7 @@
   const REASONS = {
     wall:     ['Hit a wall', 'You clipped the wall of a taller building, bounced off, and fell into the gap.'],
     abyss:    ['Fell into the gap', 'The jump wasn\'t far enough to reach the next roof.'],
-    nocharge: ['No power charged', 'Landed on a roof without touching the screen to charge, so the jump couldn\'t continue.']
+    walkoff:  ['Walked off the edge', 'You didn\'t jump before reaching the end of the roof.']
   };
   function showDead(){
     const dist = Math.max(0, maxX);
@@ -349,7 +370,7 @@
   }
 
   function onLand(b){
-    grounded = true; P.vx = 0; P.vy = 0; lastRoof = b.h; landT = 0.14;
+    grounded = true; P.vx = 0; P.vy = 0; lastRoof = b.h; landT = 0.14; curB = b; walkedOff = false;
     hitWall = false; bounceCount = 0;   // đáp an toàn lên nóc nhà thì thoát khỏi chuỗi bật tường
     for (let i = 0; i < 9; i++){
       particles.push({ x: P.x, y: b.h + 0.05, fl: b.h, vx: rand(-1.6, 1.6), vy: rand(0.6, 2.2), life: rand(0.25, 0.5) });
@@ -360,7 +381,7 @@
     } else if (pending !== null){        // đã chốt lực trước đó
       const h = pending; pending = null; launch(h);
     } else {
-      die('nocharge');                   // chạm nóc mà chưa tích lực: không liền mạch
+      P.vx = WALK_SPEED;                 // chưa tích lực: tự đi bộ chậm về phía trước trên mái nhà
     }
   }
 
@@ -384,7 +405,14 @@
           hitWall = true; wallT = 0.12;
           spawnWallHit(P.x, P.y, Math.sign(P.vx) || 1);
           if (++bounceCount > MAX_BOUNCES) die('wall');   // an toàn: chặn dội vô hạn giữa hai tường sát nhau
-        } else die(hitWall ? 'wall' : res.type);
+        } else die(hitWall ? 'wall' : (walkedOff ? 'walkoff' : res.type));
+      }
+    } else if (state === 'playing' && grounded && P.vx > 0){
+      // đang đi bộ chậm trên mái nhà: nếu đi hết mép mà chưa nhảy thì rơi khỏi mép một cách tự nhiên
+      P.x += P.vx * dt;
+      if (P.x > maxX) maxX = P.x;
+      if (curB && P.x - HW > curB.x1){
+        grounded = false; walkedOff = true;   // rơi khỏi mép: vx giữ nguyên đà đi bộ, vy bắt đầu từ 0 rồi rơi theo g
       }
     }
     for (let i = particles.length - 1; i >= 0; i--){
@@ -488,58 +516,56 @@
     if (landT > 0){ const l = landT / 0.14; ky = 1 - 0.22 * l; kx = 1 + 0.16 * l; }
     else if (wallT > 0){ const l = wallT / 0.12; kx = 1 - 0.3 * l; ky = 1 + 0.2 * l; }
     else if (!grounded){ const s = Math.min(0.14, Math.abs(P.vy) / 14 * 0.14); ky = 1 + s; kx = 1 - s * 0.6; }
+    else if (grounded && P.vx > 0){ const s = Math.sin(P.x * 9) * 0.05; ky *= 1 + s; kx *= 1 - s * 0.5; }   // lắc nhẹ theo nhịp bước, kết hợp cùng độ nén khi đang tích lực
     const bw = 0.62 * kx * S, bh = 0.74 * ky * S;
     const cx = sx(P.x), cy = sy(P.y) - bh / 2;
 
     ctx.fillStyle = COL.accent; ctx.strokeStyle = COL.ink; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.ellipse(cx, cy, bw / 2, bh / 2, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    // kính che mặt kiểu tương lai: một khối liền, đuôi nhọn phía sau, vệt sáng phát quang phía trước
-    drawVisor(cx + bw * 0.05, cy - bh * 0.05, bw * 0.86, bh * 0.32);
+    // kính che mặt: toạ độ đo trực tiếp từ ảnh mẫu bằng phân vùng màu (OpenCV), không áng chừng bằng mắt
+    drawVisor(cx + bw * 0.08, cy - bh * 0.02, bw * 1.05);
   }
 
-  function drawVisor(vcx, vcy, w, h){
-    const hw = w / 2, hh = h / 2;
+  // Không gian thiết kế 425×153, các điểm lấy đúng theo contour thật đo được trên ảnh mẫu người dùng cung cấp
+  // (tách nền bằng ngưỡng màu, dò biên, đơn giản hoá đa giác), co giãn đều theo w để giữ nguyên tỉ lệ gốc.
+  function drawVisor(vcx, vcy, w){
+    const DW = 425, DH = 153, k = w / DW, h = DH * k;
     ctx.save();
-    ctx.translate(vcx, vcy);
-    // cánh nhọn phía sau (giống chi tiết "vây" chĩa lên ở ảnh mẫu)
+    ctx.translate(vcx - w / 2, vcy - h * 0.42);
+    ctx.scale(k, k);
+
+    // viền ngoài: mép trên (trái->phải) -> đầu nhọn phải -> mép dưới có khe hình chữ V (phải->trái) -> đầu nhọn trái
+    const OUT = [
+      [0,0],[30,2],[60,5],[90,8],[120,11],[150,14],[180,16],[210,17],[240,19],
+      [270,20],[300,20],[330,21],[360,20],[384,20],[390,11],[415,11],[425,79],
+      [411,120],[377,146],[365,143],[345,114],[319,115],[275,153],[178,132],
+      [103,95],[80,49],[20,30]
+    ];
     ctx.beginPath();
-    ctx.moveTo(-hw * 0.12, -hh * 0.58);
-    ctx.lineTo(-hw * 1.1, -hh * 1.12);
-    ctx.lineTo(-hw * 0.55, -hh * 0.18);
-    ctx.lineTo(-hw * 0.12, hh * 0.08);
+    ctx.moveTo(OUT[0][0], OUT[0][1]);
+    for (let i = 1; i < OUT.length; i++) ctx.lineTo(OUT[i][0], OUT[i][1]);
     ctx.closePath();
-    ctx.fillStyle = '#171c24';
+    ctx.fillStyle = '#182236';
     ctx.fill();
-    ctx.lineWidth = Math.max(1, hh * 0.1);
-    ctx.strokeStyle = '#05070a';
+    ctx.strokeStyle = '#04070a'; ctx.lineWidth = 4; ctx.lineJoin = 'round';
     ctx.stroke();
-    // khối kính chính: bo tròn phía sau, thon nhọn phía trước, vát chéo cạnh dưới trước
+
+    // mặt vát chéo sáng hơn cắt ngang tròng kính (đúng vị trí quan sát được trong ảnh)
     ctx.beginPath();
-    ctx.moveTo(-hw * 0.12, -hh * 0.6);
-    ctx.quadraticCurveTo(hw * 0.5, -hh * 0.62, hw * 0.92, -hh * 0.32);
-    ctx.quadraticCurveTo(hw * 1.08, -hh * 0.05, hw * 0.98, hh * 0.12);
-    ctx.lineTo(hw * 0.6, hh * 0.9);
-    ctx.quadraticCurveTo(hw * 0.15, hh * 0.72, -hw * 0.12, hh * 0.58);
+    ctx.moveTo(101, 22); ctx.lineTo(146, 14); ctx.lineTo(221, 139); ctx.lineTo(176, 149);
     ctx.closePath();
-    ctx.fillStyle = '#12161c';
+    ctx.fillStyle = 'rgba(190,205,225,.14)';
     ctx.fill();
-    ctx.lineWidth = Math.max(1, hh * 0.12);
-    ctx.strokeStyle = '#05070a';
-    ctx.stroke();
-    // vệt bo sáng nhẹ ở mép trên cho có khối
-    ctx.strokeStyle = 'rgba(255,255,255,.16)'; ctx.lineWidth = Math.max(0.8, hh * 0.07); ctx.lineCap = 'round';
+
+    // vệt sáng phát quang: đúng đường tâm đo được của vệt cyan (hơi võng xuống ở giữa rồi nhô lại)
+    ctx.shadowColor = COL.accent; ctx.shadowBlur = 9;
+    ctx.strokeStyle = COL.accent; ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.beginPath();
-    ctx.moveTo(-hw * 0.03, -hh * 0.5);
-    ctx.quadraticCurveTo(hw * 0.45, -hh * 0.55, hw * 0.82, -hh * 0.28);
-    ctx.stroke();
-    // vệt sáng phát quang màu accent chạy ngang giữa kính
-    ctx.shadowColor = COL.accent; ctx.shadowBlur = Math.max(3, hh * 1.1);
-    ctx.strokeStyle = COL.accent; ctx.lineWidth = Math.max(1.1, hh * 0.16); ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(-hw * 0.02, hh * 0.08);
-    ctx.quadraticCurveTo(hw * 0.4, -hh * 0.02, hw * 0.82, -hh * 0.02);
+    ctx.moveTo(139, 54); ctx.lineTo(201, 60); ctx.lineTo(251, 63.5); ctx.lineTo(307, 65.5);
+    ctx.lineTo(351, 64); ctx.lineTo(391, 61.5); ctx.lineTo(420, 57);
     ctx.stroke();
     ctx.shadowBlur = 0;
+
     ctx.restore();
   }
 
@@ -613,12 +639,78 @@
       const tt = Math.max(shown, T_MIN);
       elRead.innerHTML = 'Power <b>' + Math.round((tt - T_MIN) / (T_MAX - T_MIN) * 100) + '%</b>';
     } else if (warn === 'nocharge'){
-      elRead.innerHTML = '<span class="no">No power!</span>';
+      elRead.innerHTML = '<span class="no">No power — will just walk</span>';
     } else if (state !== 'dead'){
       elRead.textContent = 'Drag to charge power';
     } else {
       elRead.textContent = '';
     }
+  }
+
+  /* ---------- Hình minh hoạ cách chơi (vòng lặp riêng, chỉ chạy ở màn hình chờ) ---------- */
+  function drawDemo(dt){
+    if (!dctx) return;
+    demoT += dt;
+    const CYCLE = 3.0, FLIGHT = 0.8, CHARGE = 0.9, FADE = 0.15;
+    let t = demoT % CYCLE;
+    const W = 300, H = 120, baseY = 92, roofH = 20;
+    const leftX0 = 20, leftX1 = 100, rightX0 = 200, rightX1 = 280;
+
+    dctx.clearRect(0, 0, W, H);
+    // độ mờ dần khi vòng lặp bắt đầu/kết thúc để che chỗ "dịch chuyển tức thời" về lại đầu
+    let alpha = 1;
+    if (t < FADE) alpha = t / FADE;
+    else if (t > CYCLE - FADE) alpha = (CYCLE - t) / FADE;
+    dctx.globalAlpha = alpha;
+
+    // hai nóc nhà + khe
+    dctx.fillStyle = '#1c2733';
+    dctx.fillRect(leftX0, baseY, leftX1 - leftX0, H - baseY);
+    dctx.fillRect(rightX0, baseY, rightX1 - rightX0, H - baseY);
+    dctx.fillStyle = '#3d5468';
+    dctx.fillRect(leftX0, baseY, leftX1 - leftX0, 5);
+    dctx.fillRect(rightX0, baseY, rightX1 - rightX0, 5);
+    dctx.fillStyle = 'rgba(255,103,103,.7)';
+    dctx.fillRect(leftX1, baseY, rightX0 - leftX1, 2);
+
+    let px, py, charging = false, chargeFrac = 0, squash = 0;
+    if (t < CHARGE){
+      px = leftX0 + 30; py = 0; charging = true; chargeFrac = t / CHARGE;
+    } else if (t < CHARGE + FLIGHT){
+      const s = (t - CHARGE) / FLIGHT;
+      px = leftX0 + 30 + (rightX0 + 30 - (leftX0 + 30)) * s;
+      py = Math.sin(Math.PI * s) * 46;
+    } else if (t < CHARGE + FLIGHT + 0.15){
+      px = rightX0 + 30; py = 0; squash = 1 - (t - CHARGE - FLIGHT) / 0.15;
+    } else {
+      px = rightX0 + 30; py = 0;
+    }
+
+    // vệt bay mờ để gợi ý quỹ đạo parabol
+    if (t >= CHARGE && t < CHARGE + FLIGHT){
+      dctx.fillStyle = 'rgba(63,169,245,.35)';
+      for (let i = 0; i <= 10; i++){
+        const s = i / 10; if (s > (t - CHARGE) / FLIGHT) break;
+        const dx = leftX0 + 30 + (rightX0 + 30 - (leftX0 + 30)) * s;
+        const dy = Math.sin(Math.PI * s) * 46;
+        dctx.beginPath(); dctx.arc(dx, baseY - dy, 2, 0, Math.PI * 2); dctx.fill();
+      }
+    }
+
+    // thanh sạc lực nhỏ phía trên nhân vật lúc giữ
+    if (charging){
+      dctx.fillStyle = 'rgba(255,255,255,.15)'; dctx.fillRect(px - 16, baseY - 44, 32, 6);
+      dctx.fillStyle = '#3fa9f5'; dctx.fillRect(px - 16, baseY - 44, 32 * chargeFrac, 6);
+    }
+
+    // nhân vật đơn giản: hình bầu dục + một vệt kính nhỏ
+    const ky = 1 - 0.3 * squash, kx = 1 + 0.22 * squash;
+    dctx.fillStyle = '#3fa9f5'; dctx.strokeStyle = '#e7edf5'; dctx.lineWidth = 1.6;
+    dctx.beginPath(); dctx.ellipse(px, baseY - py - 9 * ky, 11 * kx, 9 * ky, 0, 0, Math.PI * 2); dctx.fill(); dctx.stroke();
+    dctx.strokeStyle = '#0a0e14'; dctx.lineWidth = 2.2; dctx.lineCap = 'round';
+    dctx.beginPath(); dctx.moveTo(px - 5, baseY - py - 9 * ky); dctx.lineTo(px + 6, baseY - py - 10 * ky); dctx.stroke();
+
+    dctx.globalAlpha = 1;
   }
 
   /* ---------- Vòng lặp ---------- */
@@ -640,6 +732,7 @@
     while (buildings.length > 4 && buildings[1].x1 < camX - 25) buildings.shift();
 
     render();
+    if (state === 'ready') drawDemo(dt);
     requestAnimationFrame(frame);
   }
 
@@ -649,4 +742,4 @@
 })();
 </script>
 </body>
-</html>
+</html
