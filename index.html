@@ -52,9 +52,10 @@
   .card ul{margin:0 0 10px;padding-left:18px;font-size:13.5px;line-height:1.5}
   .card .legend{display:flex;gap:14px;font-size:13px;margin-bottom:6px}
   .card .legend i{display:inline-block;width:18px;height:0;border-top:4px dotted;vertical-align:middle;margin-right:6px}
-  #demo{display:block;width:100%;height:auto;aspect-ratio:300/120;border-radius:8px;background:rgba(255,255,255,.04)}
+  #demo{position:static;inset:auto;display:block;width:100%;height:auto;margin:10px 0 0;aspect-ratio:300/120;border-radius:8px;background:rgba(255,255,255,.04)}
   .demoCaption{display:flex;justify-content:center;gap:8px;margin-top:6px;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.01em}
   .demoCaption span{color:var(--ink)}
+  .demoNote{margin-top:8px;font-size:12px;line-height:1.4;color:var(--muted);text-align:center}
   .card button{
     pointer-events:auto;margin-top:12px;width:100%;font:inherit;font-weight:700;font-size:16px;
     padding:13px;border:2px solid var(--ink);border-radius:10px;background:var(--accent);color:var(--paper);cursor:pointer;
@@ -84,10 +85,11 @@
 <div class="ov" id="ov">
   <div class="card">
     <h1 id="ovTitle">Rooftop Leap</h1>
-    <p id="ovMsg">Drag to charge, release to jump. Roof to roof — don't hit a wall or fall.</p>
+    <p id="ovMsg">Drag right to charge, release to jump. You keep walking, so jump before the roof ends.</p>
     <div id="ovBody">
       <canvas id="demo" width="300" height="120"></canvas>
-      <div class="demoCaption"><span>Hold</span>→<span>Release</span>→<span>Land</span></div>
+      <div class="demoCaption"><span>Drag</span>→<span>Release</span>→<span>Land</span></div>
+      <div class="demoNote">Walls and UFO bumps knock you down. Land on a UFO to take it out. A blinking UFO is about to fire a deadly laser.</div>
     </div>
     <button id="again" hidden>Play again</button>
 
@@ -153,6 +155,7 @@
   let hitUFO = false;            // rơi do đâm đầu vào đĩa bay
   let activeId = null, keyMode = false, dragX0 = 0, dragY0 = 0, dragX = 0;
   let buildings, bid, particles, ufos, uid = 0, lastTime = 0, acc = 0;
+  let beams = [], explosions = [], shX = 0, shY = 0, shakeT = 0, shakeAmp = 0;   // laser, vụ nổ, rung màn hình
 
   const COL = {
     paper:'#0b1220', ink:'#e7edf5', good:'#35c98c', bad:'#ff6767', accent:'#3fa9f5', void:'#04070c', hint:'#3fa9f5'
@@ -200,13 +203,15 @@
       last = { x0: d + gap, x1: d + gap + w, h, id: bid++ };
       buildings.push(last);
 
-      // đĩa bay ngẫu nhiên trong bầu trời phía trên, tỉ lệ xuất hiện thấp (~14%)
+      // đĩa bay ngẫu nhiên trong bầu trời phía trên, tỉ lệ xuất hiện thấp (~14% mỗi toà nhà)
       if (Math.random() < 0.14){
+        const uy = Math.max(prevH, h) + rand(3.5, 10);
         ufos.push({
-          x: d + rand(-1.5, gap + w * 0.7),
-          y: Math.max(prevH, h) + rand(3, 10),
-          r: rand(0.75, 1.05),
-          alive: true, vx: 0, vy: 0, rot: 0, rotSpeed: 0, phase: rand(0, Math.PI * 2),
+          x: d + rand(-1.5, gap + w * 0.7), y: uy, by: uy,
+          r: rand(0.8, 1.05),                       // nửa bề rộng hộp va chạm (m)
+          alive: true, vx: rand(-1.4, 1.4), vy: 0, rot: 0, rotSpeed: 0,
+          phase: rand(0, Math.PI * 2), t: 0, cool: 0, shake: 0, spark: 0,
+          mode: 'idle', wt: 0, rollT: rand(0, 1), lockout: rand(0.4, 1.2),
           id: uid++
         });
       }
@@ -216,7 +221,7 @@
   function reset(){
     bid = 0; uid = 0;
     buildings = [{ x0: -12, x1: 5, h: 6, id: bid++ }];
-    ufos = [];
+    ufos = []; beams = []; explosions = []; shakeT = 0; shX = shY = 0;
     genAhead(0);
     P = { x: 0, y: 6, vx: 0, vy: 0 };
     lastRoof = 6; curB = buildings[0];
@@ -229,24 +234,41 @@
     state = 'ready'; deadReason = '';
     ov.hidden = false; btnAgain.hidden = true;
     ovTitle.textContent = 'Rooftop Leap';
-    ovMsg.textContent = 'Touch and drag right to charge power (drag left to reduce), release to jump.';
+    ovMsg.textContent = 'Drag right to charge, release to jump. You keep walking, so jump before the roof ends.';
     ovBody.hidden = false;
   }
 
   /* ---------- Vật lý bay + va chạm (dùng chung cho game và đường dự đoán) ---------- */
+  const CRATER_DEPTH_FRAC = 0.45;   // hố lõm sâu tối đa = bán kính hố × tỉ lệ này (m)
+  // Độ cao thật của mái nhà tại toạ độ x, tính luôn phần lõm xuống do các hố laser để lại.
+  function surfaceY(b, x){
+    let y = b.h;
+    if (b.craters) for (const cr of b.craters){
+      const dx = Math.abs(x - cr.x);
+      if (dx < cr.r){
+        const depth = cr.r * CRATER_DEPTH_FRAC;
+        const f = 0.5 * (1 + Math.cos(Math.PI * dx / cr.r));   // 1 ở tâm hố, 0 ở mép hố: lõm mượt
+        const yy = b.h - depth * f;
+        if (yy < y) y = yy;
+      }
+    }
+    return y;
+  }
+
   function advance(o, dt){
     const x0 = o.x, y0 = o.y;
     o.x += o.vx * dt;                              // vx không đổi
     o.y += o.vy * dt - 0.5 * G * dt * dt;          // vy giảm dần theo g
     o.vy -= G * dt;
 
-    // 1) đáp xuống nóc nhà (cắt qua mặt phẳng nóc khi đang đi xuống)
+    // 1) đáp xuống nóc nhà (cắt qua bề mặt thật khi đang đi xuống — bề mặt có thể lõm do hố laser)
     for (const b of buildings){
-      if (y0 >= b.h - 1e-9 && o.y < b.h){
-        const k = (y0 - b.h) / (y0 - o.y);
+      const sh0 = surfaceY(b, x0), sh1 = surfaceY(b, o.x);
+      if (y0 >= sh0 - 1e-9 && o.y < sh1){
+        const k = (y0 - sh0) / ((y0 - sh0) - (o.y - sh1));
         const xc = x0 + (o.x - x0) * k;
         if (xc >= b.x0 - LAND_M && xc <= b.x1 + LAND_M){
-          o.x = xc; o.y = b.h;
+          o.x = xc; o.y = surfaceY(b, xc);
           return { type: 'land', b };
         }
       }
@@ -254,7 +276,7 @@
     // 2) đâm vào tường nhà -> bật ra: đảo và giảm vx (mất năng lượng), đẩy ra khỏi thân nhà,
     //    nếu đang rơi thì bật lên nhẹ; vy vẫn tiếp tục chịu g như bình thường sau đó.
     for (const b of buildings){
-      if (o.x + HW > b.x0 && o.x - HW < b.x1 && o.y < b.h - 0.06){
+      if (o.x + HW > b.x0 && o.x - HW < b.x1 && o.y < surfaceY(b, o.x) - 0.06){
         const cameFromLeft = x0 + HW <= b.x0 + 1e-6;
         const cameFromRight = x0 - HW >= b.x1 - 1e-6;
         const toLeft = cameFromRight ? false : cameFromLeft ? true : (o.x - b.x0) < (b.x1 - o.x);
@@ -286,7 +308,7 @@
     const v = speedFor(h);
     P.vx = v * Math.cos(ANG);
     P.vy = v * Math.sin(ANG);
-    grounded = false; walkedOff = false;
+    grounded = false; walkedOff = false; hitUFO = false;
   }
   // Tích lực bằng thao tác kéo ngang: chạm điểm đầu, kéo sang phải để tăng, kéo về trái để giảm.
   // Có thể tích cả khi đang bay: lực tích trên không được dùng ngay khi chạm nóc nhà.
@@ -356,7 +378,9 @@
   const REASONS = {
     wall:     ['Hit a wall', 'You clipped the wall of a taller building, bounced off, and fell into the gap.'],
     abyss:    ['Fell into the gap', 'The jump wasn\'t far enough to reach the next roof.'],
-    walkoff:  ['Walked off the edge', 'You didn\'t jump before reaching the end of the roof.']
+    walkoff:  ['Walked off the edge', 'You didn\'t jump before reaching the end of the roof.'],
+    ufo:      ['Knocked out of the sky', 'You bumped into a UFO and fell short of the next roof.'],
+    explosion:['Blown up', 'A UFO laser blast caught you.']
   };
   function showDead(){
     const dist = Math.max(0, maxX);
@@ -370,18 +394,17 @@
   }
 
   function onLand(b){
-    grounded = true; P.vx = 0; P.vy = 0; lastRoof = b.h; landT = 0.14; curB = b; walkedOff = false;
+    grounded = true; P.vx = 0; P.vy = 0; lastRoof = b.h; landT = 0.14; curB = b; walkedOff = false; hitUFO = false;
     hitWall = false; bounceCount = 0;   // đáp an toàn lên nóc nhà thì thoát khỏi chuỗi bật tường
     for (let i = 0; i < 9; i++){
-      particles.push({ x: P.x, y: b.h + 0.05, fl: b.h, vx: rand(-1.6, 1.6), vy: rand(0.6, 2.2), life: rand(0.25, 0.5) });
+      particles.push({ x: P.x, y: P.y + 0.05, fl: P.y, vx: rand(-1.6, 1.6), vy: rand(0.6, 2.2), life: rand(0.25, 0.5) });
     }
     genAhead(P.x);
-    if (charging){                       // đang giữ: nhảy ngay theo lực đã tích, ngừng tích thêm
-      const h = hold; charging = false; hold = 0; pending = null; launch(h);
-    } else if (pending !== null){        // đã chốt lực trước đó
+    if (!charging && pending !== null){  // đã thả tay từ trên không: lực đã chốt, nhảy ngay khi chạm mái
       const h = pending; pending = null; launch(h);
     } else {
-      P.vx = WALK_SPEED;                 // chưa tích lực: tự đi bộ chậm về phía trước trên mái nhà
+      // Đang giữ thì KHÔNG tự nhảy: tiếp tục tích lực, chỉ nhảy khi người chơi thả tay.
+      P.vx = WALK_SPEED;                 // trong lúc chờ, nhân vật đi bộ về phía trước trên mái nhà
     }
   }
 
@@ -391,10 +414,175 @@
     }
   }
 
+  /* ---------- Đĩa bay ---------- */
+  const BODY_H = 0.74;   // chiều cao thân nhân vật (m), dùng để tính va chạm đầu
+  const UFO_HH = 0.6;    // nửa chiều cao hộp va chạm đĩa bay (m)
+  const UFO_HW = 1.2;    // nửa bề rộng hộp va chạm = UFO_HW × r
+  const CYAN = 'rgba(127,230,232,.9)';
+  // Laser: mỗi giây, mỗi đĩa bay đang ở trong màn hình có 20% cơ hội bắt đầu bắn (có thời gian hồi giữa hai lần bắn).
+  const LASER_CHANCE = 0.20;   // xác suất mỗi lần thử (mỗi giây)
+  const LASER_COOLDOWN = 4;    // giây nghỉ tối thiểu giữa hai lần bắn của cùng một đĩa
+  const LASER_MAX_ANGLE = 30;  // độ lệch tối đa so với phương thẳng đứng (°), random 0–30° mỗi lần bắn
+  const WARN_T = 1.0;          // thời gian cảnh báo (s)
+  const WARN_BLINKS = 3;       // số lần nhấp nháy trong thời gian cảnh báo
+  const EXPL_MIN = 2, EXPL_MAX = 5;   // bán kính hố biến dạng / vụ nổ ngẫu nhiên (m)
+  const EXPL_GROW = 0.4, EXPL_LIFE = 0.75;   // thời gian nở hết cỡ / tồn tại (s)
+
+  function ufoSparks(x, y, n, speed){
+    for (let i = 0; i < n; i++){
+      const a = Math.random() * Math.PI * 2, s = rand(0.4, 1) * speed;
+      particles.push({ x, y, fl: -1e9, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(0.25, 0.55),
+                       c: Math.random() < 0.5 ? CYAN : 'rgba(255,255,255,.85)' });
+    }
+  }
+
+  function updateUfos(dt){
+    for (let i = ufos.length - 1; i >= 0; i--){
+      const u = ufos[i];
+      u.t += dt;
+      if (u.cool > 0) u.cool -= dt;
+      if (u.shake > 0) u.shake -= dt;
+      if (u.alive){
+        if (u.mode === 'warn'){
+          // đứng yên tại chỗ để nhắm; nhấp nháy đủ WARN_T giây rồi bắn thẳng xuống
+          u.wt += dt;
+          if (u.wt >= WARN_T) fireLaser(u);
+        } else {
+          u.x += u.vx * dt;
+          if (u.lockout > 0) u.lockout -= dt;
+          u.rollT -= dt;
+          if (u.rollT <= 0){
+            u.rollT += 1;   // thử lại 1 lần mỗi giây
+            if (state === 'playing' && u.lockout <= 0 && u.x > camX && u.x < camX + viewW && Math.random() < LASER_CHANCE){
+              u.mode = 'warn'; u.wt = 0;
+              // Chốt sẵn góc bắn và điểm ngắm ngay lúc bắt đầu cảnh báo, để điểm ngắm hiển thị
+              // đúng khớp với phát bắn thật sẽ xảy ra khi hết thời gian nhấp nháy.
+              const ox = u.x, oy = u.y - 0.6 * u.r;
+              const ang = rand(0, LASER_MAX_ANGLE) * (Math.random() < 0.5 ? -1 : 1) * Math.PI / 180;
+              const dirX = Math.sin(ang), dirY = -Math.cos(ang);
+              u.aim = marchLaser(ox, oy, dirX, dirY, 40);
+              u.aim.R = rand(EXPL_MIN, EXPL_MAX);   // chốt sẵn cả bán kính nổ để điểm ngắm hiển thị đúng phạm vi nguy hiểm
+            }
+          }
+        }
+        u.y = u.by + Math.sin(u.t * 1.4 + u.phase) * 0.45;   // lơ lửng nhẹ nhàng
+      } else {
+        // đĩa bị hạ: rơi tự do theo g, xoay tròn, toé tia lửa
+        u.vy -= G * dt;
+        u.x += u.vx * dt; u.y += u.vy * dt; u.rot += u.rotSpeed * dt;
+        u.spark -= dt;
+        if (u.spark <= 0){ u.spark = 0.05; ufoSparks(u.x, u.y, 1, 1.2); }
+        let crashed = false;
+        for (const b of buildings){
+          if (u.x > b.x0 && u.x < b.x1 && u.y - UFO_HH * 0.6 <= b.h){ crashed = true; u.y = b.h; break; }
+        }
+        if (crashed){ ufoSparks(u.x, u.y + 0.1, 16, 4.5); ufos.splice(i, 1); continue; }
+      }
+      if (u.x < camX - 25 || u.y < FLOOR - 6) ufos.splice(i, 1);
+    }
+  }
+
+  // Dò tia laser theo một hướng bất kỳ (không chỉ thẳng đứng): đi từng bước nhỏ cho tới khi
+  // chạm mái nhà, chạm nhân vật, hoặc xuống tới đáy vực.
+  function marchLaser(ox, oy, dirX, dirY, maxLen){
+    const step = 0.08;
+    for (let d = 0; d < maxLen; d += step){
+      const x = ox + dirX * d, y = oy + dirY * d;
+      for (const b of buildings){
+        if (x >= b.x0 && x <= b.x1 && y <= b.h) return { x, y, b };
+      }
+      if (state === 'playing' && Math.abs(x - P.x) < HW && y >= P.y && y <= P.y + BODY_H) return { x, y, player: true };
+      if (y < FLOOR) return { x, y: FLOOR };
+    }
+    return { x: ox + dirX * maxLen, y: oy + dirY * maxLen };
+  }
+
+  // Bắn laser với góc lệch ngẫu nhiên 0–30° so với phương thẳng đứng: chạm mái nhà / nhân vật /
+  // đáy vực thì nổ ngay tại điểm chạm, hố nổ tròn bán kính ngẫu nhiên làm biến dạng bề mặt mái nhà.
+  function fireLaser(u){
+    u.mode = 'idle'; u.wt = 0; u.lockout = LASER_COOLDOWN;
+    const ox = u.x, oy = u.y - 0.6 * u.r;
+    let hit = u.aim;
+    if (!hit){   // dự phòng nếu vì lý do gì đó chưa có điểm ngắm chốt sẵn
+      const ang = rand(0, LASER_MAX_ANGLE) * (Math.random() < 0.5 ? -1 : 1) * Math.PI / 180;
+      hit = marchLaser(ox, oy, Math.sin(ang), -Math.cos(ang), 40);
+    }
+    u.aim = null;
+    const bx = hit.x, hitY = hit.y;
+
+    beams.push({ x0: ox, y0: oy, x1: bx, y1: hitY, t: 0, dur: 0.35 });
+    const R = hit.R || rand(EXPL_MIN, EXPL_MAX);
+    explosions.push({ x: bx, y: hitY, R, t: 0 });
+    if (hit.b){ hit.b.craters = hit.b.craters || []; hit.b.craters.push({ x: bx, r: R * rand(0.55, 0.75) }); }
+    shakeT = 0.4; shakeAmp = Math.min(12, R * 2);
+    // mảnh vỡ và khói
+    for (let i = 0; i < 28; i++){
+      const a = rand(0.15, Math.PI - 0.15), sp = rand(3, 9);
+      particles.push({ x: bx, y: hitY, fl: -1e9, vx: Math.cos(a) * sp * (Math.random() < .5 ? 1 : -1) * rand(.5, 1), vy: Math.sin(a) * sp,
+        life: rand(0.5, 1.1), life0: 1, r: rand(1.4, 2.6), c: Math.random() < .5 ? '#ffb347' : '#ff7a2b' });
+    }
+    for (let i = 0; i < 12; i++){
+      particles.push({ x: bx + rand(-1.5, 1.5), y: hitY + rand(0, 1.2), fl: -1e9, vx: rand(-1.6, 1.6), vy: rand(0.4, 2),
+        life: rand(0.9, 1.6), life0: 1, r: rand(9, 18), g: -0.15, c: 'rgba(95,95,110,.55)' });
+    }
+  }
+
+  const EXPL_KILL_R = 1;   // bán kính gây chết cố định quanh tâm vụ nổ (m) — không phụ thuộc bán kính hình ảnh 2–5m
+  function updateBlasts(dt){
+    for (let i = beams.length - 1; i >= 0; i--){
+      beams[i].t += dt;
+      if (beams[i].t >= beams[i].dur) beams.splice(i, 1);
+    }
+    for (let i = explosions.length - 1; i >= 0; i--){
+      const e = explosions[i];
+      e.t += dt;
+      e.r = e.R * (1 - Math.pow(1 - Math.min(1, e.t / EXPL_GROW), 3));   // nở nhanh rồi chậm dần (chỉ để hiển thị)
+      // chỉ chết khi ở trong bán kính 1m tính từ tâm vụ nổ, không tính theo bán kính hình ảnh
+      if (state === 'playing'){
+        const d = Math.hypot(P.x - e.x, P.y + BODY_H / 2 - e.y);
+        if (d < EXPL_KILL_R) die('explosion');
+      }
+      if (e.t >= EXPL_LIFE) explosions.splice(i, 1);
+    }
+  }
+
+  // py0: độ cao chân nhân vật ở bước trước (để biết đang rơi từ trên xuống hay đâm từ dưới/bên hông)
+  function checkUfos(py0){
+    for (const u of ufos){
+      if (!u.alive) continue;
+      const hw = u.r * UFO_HW, top = u.y + UFO_HH, bot = u.y - UFO_HH;
+      if (Math.abs(P.x - u.x) >= HW + hw) continue;
+      if (P.y >= top || P.y + BODY_H <= bot) continue;
+
+      if (P.vy < 0 && py0 >= top - 0.25){
+        // rơi xuống đè lên đĩa bay: đĩa bị hạ và rơi
+        u.alive = false; u.vy = -1.5; u.spark = 0;
+        u.rotSpeed = (Math.random() < 0.5 ? -1 : 1) * rand(2, 4);
+        landT = 0.12;
+        ufoSparks(u.x, top, 14, 3.5);
+      } else if (u.cool <= 0){
+        // đâm đầu (từ dưới) hoặc va bên hông: nhân vật bị hất rơi xuống
+        const fromBelow = P.vy > 0 && py0 + BODY_H <= bot + 0.3;
+        if (fromBelow){
+          P.y = bot - BODY_H - 0.01;
+          P.vy = -Math.max(3, P.vy * 0.35);
+        } else {
+          const dir = P.x < u.x ? -1 : 1;
+          P.x = u.x + dir * (HW + hw + 0.02);
+          P.vy = Math.min(P.vy, -3);
+        }
+        P.vx *= 0.55;
+        hitUFO = true; wallT = 0.12; u.cool = 0.6; u.shake = 0.35;
+        ufoSparks(P.x, P.y + BODY_H, 10, 3);
+      }
+    }
+  }
+
   function step(dt){
     if (charging && keyMode) hold = Math.min(T_MAX, hold + dt);
     if (landT > 0) landT = Math.max(0, landT - dt);
     if (wallT > 0) wallT = Math.max(0, wallT - dt);
+    const py0 = P.y;
 
     if (state !== 'dead' && !grounded){
       const res = advance(P, dt);
@@ -405,26 +593,31 @@
           hitWall = true; wallT = 0.12;
           spawnWallHit(P.x, P.y, Math.sign(P.vx) || 1);
           if (++bounceCount > MAX_BOUNCES) die('wall');   // an toàn: chặn dội vô hạn giữa hai tường sát nhau
-        } else die(hitWall ? 'wall' : (walkedOff ? 'walkoff' : res.type));
+        } else die(hitWall ? 'wall' : hitUFO ? 'ufo' : (walkedOff ? 'walkoff' : res.type));
       }
     } else if (state === 'playing' && grounded && P.vx > 0){
-      // đang đi bộ chậm trên mái nhà: nếu đi hết mép mà chưa nhảy thì rơi khỏi mép một cách tự nhiên
+      // đang đi bộ trên mái nhà: nếu đi hết mép mà chưa nhảy thì rơi khỏi mép một cách tự nhiên
       P.x += P.vx * dt;
       if (P.x > maxX) maxX = P.x;
       if (curB && P.x - HW > curB.x1){
         grounded = false; walkedOff = true;   // rơi khỏi mép: vx giữ nguyên đà đi bộ, vy bắt đầu từ 0 rồi rơi theo g
+      } else if (curB){
+        P.y = surfaceY(curB, P.x);   // bám theo bề mặt thật: lõm xuống rồi nhô lên khi đi ngang qua hố laser
       }
     }
+    if (state === 'playing' && !grounded) checkUfos(py0);
+    if (state !== 'ready') updateUfos(dt);
+    updateBlasts(dt);
     for (let i = particles.length - 1; i >= 0; i--){
       const p = particles[i];
-      p.life -= dt; p.vy -= G * dt * 0.5; p.x += p.vx * dt; p.y = Math.max(p.fl, p.y + p.vy * dt);
+      p.life -= dt; p.vy -= G * dt * (p.g === undefined ? 0.5 : p.g); p.x += p.vx * dt; p.y = Math.max(p.fl, p.y + p.vy * dt);
       if (p.life <= 0) particles.splice(i, 1);
     }
   }
 
   /* ---------- Vẽ ---------- */
-  const sx = x => (x - camX) * S;
-  const sy = y => anchorY - (y - camY) * S;
+  const sx = x => (x - camX) * S + shX;
+  const sy = y => anchorY - (y - camY) * S + shY;
 
   function drawGrid(){
     const x0 = Math.floor(camX) - 1, x1 = Math.ceil(camX + viewW) + 1;
@@ -463,23 +656,74 @@
       if (b.x1 < camX - 1 || b.x0 > camX + viewW + 1) continue;
       const X0 = sx(b.x0), Wd = (b.x1 - b.x0) * S, Yt = sy(b.h);
       const ci = b.id % BODY.length;
-      ctx.fillStyle = BODY[ci]; ctx.fillRect(X0, Yt, Wd, yBase - Yt);
-      // cửa sổ
       const cols = Math.max(1, Math.floor((b.x1 - b.x0 - 0.3) / 1.1));
       const offX = ((b.x1 - b.x0) - cols * 1.1) / 2 + 0.325;
-      for (let r = 0; ; r++){
-        const wy = b.h - 1.3 - r * 1.5;
-        const Y = sy(wy);
-        if (Y > H || wy < FLOOR) break;
-        if (Y < -40) continue;
-        for (let c = 0; c < cols; c++){
-          const lit = hash(b.id + 1, c, r) < 45;
-          ctx.fillStyle = lit ? 'rgba(150,215,255,.55)' : 'rgba(255,255,255,.05)';
-          ctx.fillRect(sx(b.x0 + offX + c * 1.1), Y, 0.45 * S, 0.62 * S);
+
+      if (b.craters && b.craters.length){
+        // Toà nhà bị laser bắn trúng: cắt hẳn phần bị bắn theo đúng bề mặt lõm (surfaceY) — không
+        // còn vẽ đè một khối tối lên bề mặt cũ — chỉ để lại một vệt cháy màu nâu dọc mép mới lộ ra.
+        const N = Math.max(10, Math.round((b.x1 - b.x0) * 5));
+        const top = [];
+        for (let i = 0; i <= N; i++){
+          const x = b.x0 + (b.x1 - b.x0) * i / N;
+          top.push([sx(x), sy(surfaceY(b, x))]);
         }
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(top[0][0], top[0][1]);
+        for (const p of top) ctx.lineTo(p[0], p[1]);
+        ctx.lineTo(X0 + Wd, yBase); ctx.lineTo(X0, yBase);
+        ctx.closePath();
+        ctx.clip();   // mọi thứ vẽ bên dưới sẽ tự động bị cắt theo đúng hình đã khoét, để lộ nền trời
+
+        ctx.fillStyle = BODY[ci]; ctx.fillRect(X0, Yt, Wd, yBase - Yt);
+        for (let r = 0; ; r++){
+          const wy = b.h - 1.3 - r * 1.5;
+          const Y = sy(wy);
+          if (Y > H || wy < FLOOR) break;
+          if (Y < -40) continue;
+          for (let c = 0; c < cols; c++){
+            const lit = hash(b.id + 1, c, r) < 45;
+            ctx.fillStyle = lit ? 'rgba(150,215,255,.55)' : 'rgba(255,255,255,.05)';
+            ctx.fillRect(sx(b.x0 + offX + c * 1.1), Y, 0.45 * S, 0.62 * S);
+          }
+        }
+        ctx.fillStyle = CAP[ci]; ctx.fillRect(X0, Yt, Wd, Math.max(5, 0.22 * S));
+        ctx.restore();
+
+        // vệt cháy màu nâu dọc theo đúng mép mới lộ ra, chỉ trong phạm vi từng hố
+        for (const cr of b.craters){
+          const M = Math.max(8, Math.round(cr.r * 8));
+          ctx.strokeStyle = 'rgba(130,65,38,.85)';
+          ctx.lineWidth = Math.max(1.5, 0.045 * S);
+          ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+          ctx.beginPath();
+          let first = true;
+          for (let i = 0; i <= M; i++){
+            const x = cr.x - cr.r + (2 * cr.r) * i / M;
+            if (x < b.x0 || x > b.x1){ first = true; continue; }
+            const X = sx(x), Y = sy(surfaceY(b, x));
+            if (first){ ctx.moveTo(X, Y); first = false; } else ctx.lineTo(X, Y);
+          }
+          ctx.stroke();
+        }
+      } else {
+        ctx.fillStyle = BODY[ci]; ctx.fillRect(X0, Yt, Wd, yBase - Yt);
+        // cửa sổ
+        for (let r = 0; ; r++){
+          const wy = b.h - 1.3 - r * 1.5;
+          const Y = sy(wy);
+          if (Y > H || wy < FLOOR) break;
+          if (Y < -40) continue;
+          for (let c = 0; c < cols; c++){
+            const lit = hash(b.id + 1, c, r) < 45;
+            ctx.fillStyle = lit ? 'rgba(150,215,255,.55)' : 'rgba(255,255,255,.05)';
+            ctx.fillRect(sx(b.x0 + offX + c * 1.1), Y, 0.45 * S, 0.62 * S);
+          }
+        }
+        // mái (sàn bật nhảy)
+        ctx.fillStyle = CAP[ci]; ctx.fillRect(X0, Yt, Wd, Math.max(5, 0.22 * S));
       }
-      // mái (sàn bật nhảy)
-      ctx.fillStyle = CAP[ci]; ctx.fillRect(X0, Yt, Wd, Math.max(5, 0.22 * S));
     }
     // đáy vực
     if (yBase < H){
@@ -569,11 +813,155 @@
     ctx.restore();
   }
 
-  function drawParticles(){
-    ctx.fillStyle = 'rgba(255,255,255,.7)';
-    for (const p of particles){
-      ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 2.2, 0, Math.PI * 2); ctx.fill();
+  /* ---------- Vẽ đĩa bay (dựng lại theo ảnh mẫu, không gian thiết kế ~207×133) ---------- */
+  function drawUfo(u){
+    const k = (u.r * 2.9 * S) / 192;
+    const lit = u.alive;
+    const warn = lit && u.mode === 'warn';
+    const on = warn && ((u.wt / WARN_T * WARN_BLINKS) % 1) < 0.5;   // nửa đầu mỗi nhịp: đèn đỏ, nửa sau: mờ đi
+    ctx.save();
+    if (warn && !on) ctx.globalAlpha = 0.3;
+    ctx.translate(sx(u.x) + (u.shake > 0 ? Math.sin(u.shake * 70) * 2.5 : 0), sy(u.y));
+    if (!u.alive) ctx.rotate(-u.rot);
+    ctx.scale(k, k);
+    ctx.translate(-104, -68);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+    // vòng sáng dưới đáy
+    ctx.beginPath(); ctx.ellipse(105, 102, 75, 15.5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = on ? 'rgba(255,90,70,.25)' : lit ? 'rgba(90,140,220,.16)' : 'rgba(90,140,220,.05)'; ctx.fill();
+    if (lit){ ctx.shadowColor = on ? 'rgba(255,90,70,.95)' : 'rgba(130,180,255,.9)'; ctx.shadowBlur = 6; }
+    ctx.strokeStyle = on ? 'rgba(255,135,115,.95)' : lit ? 'rgba(170,205,255,.9)' : 'rgba(120,140,170,.35)'; ctx.lineWidth = 2.6; ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // thân dưới tối màu
+    ctx.beginPath();
+    ctx.moveTo(38, 82); ctx.quadraticCurveTo(45, 98, 105, 100); ctx.quadraticCurveTo(165, 98, 172, 82);
+    ctx.closePath(); ctx.fillStyle = '#15242c'; ctx.fill();
+    // thấu kính đáy
+    ctx.beginPath(); ctx.ellipse(103, 99, 31, 10, 0, 0, Math.PI); ctx.closePath();
+    ctx.fillStyle = on ? '#ff9a8a' : lit ? '#7fd3d2' : '#3f5f66'; ctx.fill();
+    // ba vạch đèn nhỏ ở thân dưới
+    ctx.fillStyle = on ? '#ffe1db' : lit ? '#d7f6f4' : '#4a6068';
+    for (const [dx, dy] of [[58, 88], [105, 90], [151, 88]]){
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(dx - 3.5, dy - 1.5, 7, 3, 1.5) : ctx.rect(dx - 3.5, dy - 1.5, 7, 3); ctx.fill();
     }
+
+    // mặt trên của đĩa
+    const g = ctx.createLinearGradient(8, 0, 200, 0);
+    g.addColorStop(0, '#5f8794'); g.addColorStop(.45, '#3b5661'); g.addColorStop(1, '#2b434e');
+    ctx.beginPath();
+    ctx.moveTo(8, 70); ctx.quadraticCurveTo(30, 58, 62, 52); ctx.lineTo(147, 52);
+    ctx.quadraticCurveTo(178, 58, 200, 70); ctx.quadraticCurveTo(105, 94, 8, 70); ctx.closePath();
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = 'rgba(10,25,30,.6)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(80, 60); ctx.lineTo(66, 77); ctx.moveTo(130, 60); ctx.lineTo(149, 78); ctx.stroke();
+    // viền sáng cyan ở mép
+    if (lit){ ctx.shadowColor = on ? '#ff6a5a' : '#7fe6e8'; ctx.shadowBlur = 5; }
+    ctx.strokeStyle = on ? '#ff7a6a' : lit ? '#7fe6e8' : '#4a7176'; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo(8, 70); ctx.quadraticCurveTo(105, 94, 200, 70); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(143,214,216,.75)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(8, 70); ctx.quadraticCurveTo(30, 58, 62, 52); ctx.stroke();
+
+    // dải tối dưới mái vòm
+    ctx.beginPath(); ctx.ellipse(104, 53.5, 42, 5, 0, 0, Math.PI * 2); ctx.fillStyle = '#17232b'; ctx.fill();
+
+    // mái vòm kính
+    const dg = ctx.createLinearGradient(70, 19, 140, 52);
+    dg.addColorStop(0, '#86b0bc'); dg.addColorStop(1, '#3f6570');
+    ctx.beginPath();
+    ctx.moveTo(64, 51); ctx.bezierCurveTo(64, 30, 82, 19, 105, 19); ctx.bezierCurveTo(128, 19, 146, 30, 146, 51);
+    ctx.closePath(); ctx.fillStyle = dg; ctx.fill();
+    ctx.strokeStyle = '#0f1d24'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = 'rgba(225,246,255,.7)'; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo(72, 42); ctx.quadraticCurveTo(74, 28, 90, 24); ctx.stroke();
+
+    // ba đèn tròn phát sáng trên mặt đĩa
+    ctx.fillStyle = on ? '#ff6a5a' : lit ? '#5fe3ea' : '#2a4a50';
+    if (lit){ ctx.shadowColor = on ? '#ff6a5a' : '#5fe3ea'; ctx.shadowBlur = 6; }
+    for (const [dx, dy] of [[32, 67], [105, 72], [178, 66]]){
+      ctx.beginPath(); ctx.arc(dx, dy, 3.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+  function drawUfos(){
+    for (const u of ufos){
+      const X = sx(u.x);
+      if (X < -120 || X > W + 120) continue;
+      if (u.alive && u.mode === 'warn' && u.aim) drawAimPoint(u);
+      drawUfo(u);
+    }
+  }
+
+  // Điểm ngắm dự kiến của laser trong lúc UFO đang nhấp nháy cảnh báo: hiện đúng vị trí (và phạm vi
+  // nổ) sẽ bị bắn trúng, nhấp nháy cùng nhịp với đèn cảnh báo trên UFO để người chơi kịp né.
+  function drawAimPoint(u){
+    const on = ((u.wt / WARN_T * WARN_BLINKS) % 1) < 0.5;
+    if (!on) return;
+    const X = sx(u.aim.x), Y = sy(u.aim.y);
+    const k = Math.min(1, u.wt / WARN_T);
+    const R = Math.max(6, u.aim.R * S);
+    ctx.save();
+    ctx.globalAlpha = 0.55 + 0.35 * Math.sin(u.wt * 26);
+    // phạm vi nổ dự kiến: vòng tròn đứt nét
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(255,110,90,.8)'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(X, Y, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    // tâm ngắm: dấu cộng thu nhỏ dần theo thời gian cảnh báo, báo hiệu sắp bắn
+    const cr = Math.max(4, 14 * (1 - k) + 4);
+    ctx.strokeStyle = '#ff6a52'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(X - cr, Y); ctx.lineTo(X + cr, Y);
+    ctx.moveTo(X, Y - cr); ctx.lineTo(X, Y + cr);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(X, Y, cr * 0.45, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---------- Laser & vụ nổ ---------- */
+  function drawBlasts(){
+    for (const e of explosions){
+      const A = e.t < 0.25 ? 1 : Math.max(0, 1 - (e.t - 0.25) / (EXPL_LIFE - 0.25));
+      if (A <= 0) continue;
+      const X = sx(e.x), Y = sy(e.y), r = Math.max(1, e.r * S);
+      const g = ctx.createRadialGradient(X, Y, 0, X, Y, r);
+      g.addColorStop(0, 'rgba(255,255,255,' + A + ')');
+      g.addColorStop(0.22, 'rgba(255,236,150,' + (A * 0.95) + ')');
+      g.addColorStop(0.55, 'rgba(255,150,50,' + (A * 0.55) + ')');
+      g.addColorStop(0.85, 'rgba(255,90,30,' + (A * 0.22) + ')');
+      g.addColorStop(1, 'rgba(255,70,20,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(X, Y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,200,130,' + (A * 0.6) + ')'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(X, Y, r, 0, Math.PI * 2); ctx.stroke();
+    }
+    for (const b of beams){
+      const k = 1 - b.t / b.dur, X0 = sx(b.x0), Y0 = sy(b.y0), X1 = sx(b.x1), Y1 = sy(b.y1);
+      const fl = 0.85 + Math.random() * 0.15;
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = k * fl;
+      ctx.strokeStyle = 'rgba(110,80,255,.35)'; ctx.lineWidth = 0.7 * S;
+      ctx.beginPath(); ctx.moveTo(X0, Y0); ctx.lineTo(X1, Y1); ctx.stroke();
+      ctx.shadowColor = 'rgba(140,110,255,1)'; ctx.shadowBlur = 16;
+      ctx.strokeStyle = 'rgba(160,130,255,.95)'; ctx.lineWidth = 0.28 * S;
+      ctx.beginPath(); ctx.moveTo(X0, Y0); ctx.lineTo(X1, Y1); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.1 * S;
+      ctx.beginPath(); ctx.moveTo(X0, Y0); ctx.lineTo(X1, Y1); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawParticles(){
+    for (const p of particles){
+      ctx.globalAlpha = p.life0 ? Math.min(1, p.life * 1.6) : 1;
+      ctx.fillStyle = p.c || 'rgba(255,255,255,.7)';
+      ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), p.r || 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
   }
 
   function drawDragLine(color){
@@ -603,6 +991,8 @@
     ctx.fillStyle = COL.paper; ctx.fillRect(0, 0, W, H);
     drawGrid();
     drawBuildings();
+    drawUfos();
+    drawBlasts();
 
     // gợi ý bay: chỉ một đoạn ngắn, một màu duy nhất, không lộ kết quả trước
     let pred = null, warn = null;
@@ -647,23 +1037,25 @@
     }
   }
 
-  /* ---------- Hình minh hoạ cách chơi (vòng lặp riêng, chỉ chạy ở màn hình chờ) ---------- */
+  /* ---------- Hình minh hoạ cách chơi (khớp cơ chế thật, chỉ chạy ở màn hình chờ) ---------- */
+  // Chu trình: nhân vật đi bộ trên mái + kéo ngang để tích lực -> thả tay -> nhảy qua khe -> đáp và tiếp tục đi bộ.
   function drawDemo(dt){
     if (!dctx) return;
     demoT += dt;
-    const CYCLE = 3.0, FLIGHT = 0.8, CHARGE = 0.9, FADE = 0.15;
-    let t = demoT % CYCLE;
-    const W = 300, H = 120, baseY = 92, roofH = 20;
+    const CYCLE = 4.2, FADE = 0.2;
+    const DRAG0 = 0.3, DRAG1 = 1.5, RELEASE = 1.7, FLIGHT = 0.8, WALK = 30;   // WALK: px/s
+    const t = demoT % CYCLE;
+    const W = 300, H = 120, baseY = 92;
     const leftX0 = 20, leftX1 = 100, rightX0 = 200, rightX1 = 280;
+    const startX = leftX0 + 14, landX = rightX0 + 20;
+    const ease = x => x * x * (3 - 2 * x);
 
     dctx.clearRect(0, 0, W, H);
-    // độ mờ dần khi vòng lặp bắt đầu/kết thúc để che chỗ "dịch chuyển tức thời" về lại đầu
     let alpha = 1;
-    if (t < FADE) alpha = t / FADE;
-    else if (t > CYCLE - FADE) alpha = (CYCLE - t) / FADE;
+    if (t < FADE) alpha = t / FADE; else if (t > CYCLE - FADE) alpha = (CYCLE - t) / FADE;
     dctx.globalAlpha = alpha;
 
-    // hai nóc nhà + khe
+    // hai mái nhà + khe
     dctx.fillStyle = '#1c2733';
     dctx.fillRect(leftX0, baseY, leftX1 - leftX0, H - baseY);
     dctx.fillRect(rightX0, baseY, rightX1 - rightX0, H - baseY);
@@ -673,42 +1065,62 @@
     dctx.fillStyle = 'rgba(255,103,103,.7)';
     dctx.fillRect(leftX1, baseY, rightX0 - leftX1, 2);
 
-    let px, py, charging = false, chargeFrac = 0, squash = 0;
-    if (t < CHARGE){
-      px = leftX0 + 30; py = 0; charging = true; chargeFrac = t / CHARGE;
-    } else if (t < CHARGE + FLIGHT){
-      const s = (t - CHARGE) / FLIGHT;
-      px = leftX0 + 30 + (rightX0 + 30 - (leftX0 + 30)) * s;
-      py = Math.sin(Math.PI * s) * 46;
-    } else if (t < CHARGE + FLIGHT + 0.15){
-      px = rightX0 + 30; py = 0; squash = 1 - (t - CHARGE - FLIGHT) / 0.15;
+    // vị trí nhân vật theo từng giai đoạn
+    const releaseX = startX + WALK * RELEASE;
+    let px, py = 0, squash = 0, L = 0, dragging = false, flying = false;
+    if (t < RELEASE){
+      px = startX + WALK * t;
+      dragging = t >= DRAG0;
+      L = ease(Math.min(1, Math.max(0, (t - DRAG0) / (DRAG1 - DRAG0))));
+    } else if (t < RELEASE + FLIGHT){
+      const s = (t - RELEASE) / FLIGHT;
+      px = releaseX + (landX - releaseX) * s; py = Math.sin(Math.PI * s) * 46; flying = true;
     } else {
-      px = rightX0 + 30; py = 0;
+      const tl = t - RELEASE - FLIGHT;
+      px = landX + WALK * tl;
+      if (tl < 0.15) squash = 1 - tl / 0.15;
     }
 
-    // vệt bay mờ để gợi ý quỹ đạo parabol
-    if (t >= CHARGE && t < CHARGE + FLIGHT){
-      dctx.fillStyle = 'rgba(63,169,245,.35)';
-      for (let i = 0; i <= 10; i++){
-        const s = i / 10; if (s > (t - CHARGE) / FLIGHT) break;
-        const dx = leftX0 + 30 + (rightX0 + 30 - (leftX0 + 30)) * s;
-        const dy = Math.sin(Math.PI * s) * 46;
-        dctx.beginPath(); dctx.arc(dx, baseY - dy, 2, 0, Math.PI * 2); dctx.fill();
+    // đường kéo tích lực nằm ngang, giống giao diện thật: chấm đầu, đường đầy, núm trắng
+    if (dragging){
+      const y = 22, x0 = 96, full = 70, x1 = x0 + L * full;
+      dctx.lineCap = 'round';
+      dctx.setLineDash([2, 7]); dctx.strokeStyle = 'rgba(231,237,245,.35)'; dctx.lineWidth = 2;
+      dctx.beginPath(); dctx.moveTo(x0, y); dctx.lineTo(x0 + full, y); dctx.stroke();
+      dctx.setLineDash([]);
+      dctx.strokeStyle = '#3fa9f5'; dctx.lineWidth = 4;
+      dctx.beginPath(); dctx.moveTo(x0, y); dctx.lineTo(x1, y); dctx.stroke();
+      dctx.fillStyle = '#3fa9f5'; dctx.beginPath(); dctx.arc(x0, y, 4, 0, Math.PI * 2); dctx.fill();
+      dctx.fillStyle = '#fff'; dctx.strokeStyle = '#3fa9f5'; dctx.lineWidth = 2.5;
+      dctx.beginPath(); dctx.arc(x1, y, 6.5, 0, Math.PI * 2); dctx.fill(); dctx.stroke();
+      // đoạn gợi ý quỹ đạo ngắn phía trước nhân vật (giống trong game)
+      dctx.fillStyle = 'rgba(63,169,245,.75)';
+      for (let i = 1; i <= 6; i++){
+        const s = i * 0.04;
+        dctx.beginPath(); dctx.arc(px + (landX - px) * s, baseY - 9 - Math.sin(Math.PI * s) * 46, 1.8, 0, Math.PI * 2); dctx.fill();
       }
     }
 
-    // thanh sạc lực nhỏ phía trên nhân vật lúc giữ
-    if (charging){
-      dctx.fillStyle = 'rgba(255,255,255,.15)'; dctx.fillRect(px - 16, baseY - 44, 32, 6);
-      dctx.fillStyle = '#3fa9f5'; dctx.fillRect(px - 16, baseY - 44, 32 * chargeFrac, 6);
+    // vệt bay mờ theo quỹ đạo lúc đang nhảy
+    if (flying){
+      dctx.fillStyle = 'rgba(63,169,245,.35)';
+      const cur = (t - RELEASE) / FLIGHT;
+      for (let i = 0; i <= 10; i++){
+        const s = i / 10; if (s > cur) break;
+        dctx.beginPath(); dctx.arc(releaseX + (landX - releaseX) * s, baseY - 9 - Math.sin(Math.PI * s) * 46, 2, 0, Math.PI * 2); dctx.fill();
+      }
     }
 
-    // nhân vật đơn giản: hình bầu dục + một vệt kính nhỏ
-    const ky = 1 - 0.3 * squash, kx = 1 + 0.22 * squash;
+    // nhân vật: nén nhẹ khi tích lực, lắc nhẹ khi đi bộ, nén khi đáp
+    let ky = 1, kx = 1;
+    if (dragging){ ky = 1 - 0.25 * L; kx = 1 + 0.15 * L; }
+    if (!flying){ const bob = Math.sin(px * 0.35) * 0.05; ky *= 1 + bob; kx *= 1 - bob * 0.5; }
+    if (squash){ ky *= 1 - 0.3 * squash; kx *= 1 + 0.22 * squash; }
+    const cy = baseY - py - 9 * ky;
     dctx.fillStyle = '#3fa9f5'; dctx.strokeStyle = '#e7edf5'; dctx.lineWidth = 1.6;
-    dctx.beginPath(); dctx.ellipse(px, baseY - py - 9 * ky, 11 * kx, 9 * ky, 0, 0, Math.PI * 2); dctx.fill(); dctx.stroke();
+    dctx.beginPath(); dctx.ellipse(px, cy, 11 * kx, 9 * ky, 0, 0, Math.PI * 2); dctx.fill(); dctx.stroke();
     dctx.strokeStyle = '#0a0e14'; dctx.lineWidth = 2.2; dctx.lineCap = 'round';
-    dctx.beginPath(); dctx.moveTo(px - 5, baseY - py - 9 * ky); dctx.lineTo(px + 6, baseY - py - 10 * ky); dctx.stroke();
+    dctx.beginPath(); dctx.moveTo(px - 5, cy); dctx.lineTo(px + 6, cy - 1 * ky); dctx.stroke();
 
     dctx.globalAlpha = 1;
   }
@@ -731,6 +1143,11 @@
     genAhead(camX + viewW);
     while (buildings.length > 4 && buildings[1].x1 < camX - 25) buildings.shift();
 
+    if (shakeT > 0){
+      shakeT = Math.max(0, shakeT - dt);
+      const a = shakeAmp * (shakeT / 0.4);
+      shX = (Math.random() * 2 - 1) * a; shY = (Math.random() * 2 - 1) * a;
+    } else { shX = 0; shY = 0; }
     render();
     if (state === 'ready') drawDemo(dt);
     requestAnimationFrame(frame);
@@ -742,4 +1159,4 @@
 })();
 </script>
 </body>
-</html
+</html>
