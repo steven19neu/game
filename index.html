@@ -31,6 +31,9 @@
   .dist small{font-size:16px;font-weight:600;margin-left:3px;color:var(--muted)}
   .best{font-size:13px;color:var(--muted);text-align:right;line-height:1.35;font-variant-numeric:tabular-nums}
   .best b{color:var(--ink);font-size:15px}
+  .stars{margin-top:6px;font-size:15px;font-weight:700;color:#ffd166;font-variant-numeric:tabular-nums;transition:transform .15s}
+  .stars.pop{transform:scale(1.25)}
+  .stars.lose{color:var(--bad)}
 
   .charge{margin-top:10px}
   .track{position:relative;height:14px;border:2px solid var(--ink);border-radius:8px;background:rgba(255,255,255,.08);overflow:hidden}
@@ -73,6 +76,7 @@
     <div class="dist"><span id="dist">0.0</span><small>m</small></div>
     <div class="best">Best<br><b><span id="best">0.0</span> m</b></div>
   </div>
+  <div class="stars" id="stars">★ <span id="starCount">0</span></div>
   <div class="charge">
     <div class="track">
       <div class="fill" id="fill"></div>
@@ -89,7 +93,7 @@
     <div id="ovBody">
       <canvas id="demo" width="300" height="120"></canvas>
       <div class="demoCaption"><span>Drag</span>→<span>Release</span>→<span>Land</span></div>
-      <div class="demoNote">Walls and UFO bumps knock you down. Land on a UFO to take it out. A blinking UFO is about to fire a deadly laser.</div>
+      <div class="demoNote">Start with 3 stars. Land on a UFO for +3. Quick-tap mid-air to dash 0.5m (costs 1 star). Walls, UFO bumps, and lasers knock you down — a blinking UFO is about to fire.</div>
     </div>
     <button id="again" hidden>Play again</button>
 
@@ -124,6 +128,11 @@
   const FLOOR = -2;       // đáy vực: rơi qua mức này là thua
   const H_MIN = 3, H_MAX = 20;
   const BOUNCE_DAMP = 0.45;   // hệ số hoàn lại vận tốc ngang sau mỗi lần bật tường (mất năng lượng)
+  const DASH_DIST = 0.5;      // quãng đường dash ngang khi tap lúc đang bay (m)
+  const DASH_TIME = 0.22;     // thời gian thực hiện dash (s)
+  const DASH_SPEED = DASH_DIST / DASH_TIME;
+  const TAP_MAX_MS = 220;     // chạm rồi nhả trong khoảng này (ms), gần như không kéo, mới tính là "tap"
+  const TAP_MAX_PX = 10;      // độ lệch tối đa (px) để còn tính là tap chứ không phải kéo tích lực
   const MAX_BOUNCES = 8;      // giới hạn an toàn, tránh dội qua lại vô hạn giữa hai bức tường sát nhau
 
   /* ---------- Tiện ích ---------- */
@@ -135,6 +144,7 @@
   const canvas = $('c'), ctx = canvas.getContext('2d');
   const demoCanvas = $('demo'), dctx = demoCanvas ? demoCanvas.getContext('2d') : null;
   const elDist = $('dist'), elBest = $('best'), elFill = $('fill'), elRead = $('readout');
+  const elStars = $('stars'), elStarCount = $('starCount');
   const ov = $('ov'), ovTitle = $('ovTitle'), ovMsg = $('ovMsg'), ovBody = $('ovBody'), btnAgain = $('again');
 
   let best = 0;
@@ -148,12 +158,14 @@
   let P;                          // {x, y, vx, vy}  (y = độ cao chân)
   let grounded, charging, hold, pending, maxX, camX, camY, landT, wallT, deadT, lastRoof;
   let hitWall = false, bounceCount = 0;
+  let stars = 3;   // sao: bắt đầu có 3, +3 mỗi lần đè UFO, -1 mỗi lần dash
   let demoT = 0;
   let curB = null;               // toà nhà nhân vật đang đứng/đi bộ trên đó
   const WALK_SPEED = 3.0;        // m/s — tốc độ đi bộ trên mái nhà
   let walkedOff = false;         // rơi do đi bộ hết mép (để phân biệt lý do thua với nhảy hụt)
   let hitUFO = false;            // rơi do đâm đầu vào đĩa bay
-  let activeId = null, keyMode = false, dragX0 = 0, dragY0 = 0, dragX = 0;
+  let activeId = null, keyMode = false, dragX0 = 0, dragY0 = 0, dragX = 0, pressStartT = 0;
+  let dashT = 0;   // thời gian dash ngang còn lại (s); >0 nghĩa là đang dash
   let buildings, bid, particles, ufos, uid = 0, lastTime = 0, acc = 0;
   let beams = [], explosions = [], shX = 0, shY = 0, shakeT = 0, shakeAmp = 0;   // laser, vụ nổ, rung màn hình
 
@@ -227,7 +239,8 @@
     lastRoof = 6; curB = buildings[0];
     grounded = true; charging = false; hold = 0; pending = null; maxX = 0; landT = 0; wallT = 0; deadT = 0;
     hitWall = false; bounceCount = 0;
-    demoT = 0; walkedOff = false; hitUFO = false;
+    demoT = 0; walkedOff = false; hitUFO = false; dashT = 0;
+    stars = 3; updateStarsHUD();
     activeId = null; keyMode = false;
     particles = [];
     camX = P.x - viewW * 0.28; camY = P.y;
@@ -255,11 +268,12 @@
     return y;
   }
 
-  function advance(o, dt){
+  function advance(o, dt, gScale){
+    if (gScale === undefined) gScale = 1;
     const x0 = o.x, y0 = o.y;
-    o.x += o.vx * dt;                              // vx không đổi
-    o.y += o.vy * dt - 0.5 * G * dt * dt;          // vy giảm dần theo g
-    o.vy -= G * dt;
+    o.x += o.vx * dt;                                     // vx không đổi
+    o.y += o.vy * dt - 0.5 * G * gScale * dt * dt;        // vy giảm dần theo g (gScale=0 lúc đang dash ngang)
+    o.vy -= G * dt * gScale;
 
     // 1) đáp xuống nóc nhà (cắt qua bề mặt thật khi đang đi xuống — bề mặt có thể lõm do hố laser)
     for (const b of buildings){
@@ -327,16 +341,46 @@
   }
   function release(){
     if (!charging) return;
+    const wasKeyMode = keyMode;
     charging = false; keyMode = false;
+    const isTap = !grounded && !wasKeyMode &&
+      (performance.now() - pressStartT) < TAP_MAX_MS && Math.abs(dragX - dragX0) < TAP_MAX_PX;
+    if (isTap){ startDash(); hold = 0; return; }   // chạm rồi nhả nhanh lúc đang bay: dash ngang, không tính là tích lực
     if (grounded){ launch(hold); }
     else { pending = hold; }   // đã chốt lực, chờ chạm nóc
     hold = 0;
+  }
+  // Tap nhanh lúc đang bay: bay thẳng về phía trước, song song với phương ngang, đúng 2 m rồi rơi tiếp
+  // bình thường theo trọng lực (vận tốc dọc được giữ nguyên trong lúc dash, không cộng dồn thêm).
+  function updateStarsHUD(flash){
+    elStarCount.textContent = stars;
+    if (flash){
+      elStars.classList.remove('pop', 'lose'); void elStars.offsetWidth;
+      elStars.classList.add('pop');
+      if (flash === 'lose') elStars.classList.add('lose');
+      clearTimeout(updateStarsHUD._t);
+      updateStarsHUD._t = setTimeout(() => elStars.classList.remove('pop', 'lose'), 260);
+    }
+  }
+  function startDash(){
+    if (stars <= 0) return;   // hết sao thì không dash được
+    if (dashT > 0) return;
+    dashT = DASH_TIME;
+    P.vy = 0;
+    P.vx = DASH_SPEED;
+    pending = null;
+    stars -= 1; updateStarsHUD('lose');
+    for (let i = 0; i < 8; i++){
+      particles.push({ x: P.x - i * 0.12, y: P.y + rand(0.1, 0.5), fl: -1e9,
+        vx: -rand(1, 3), vy: rand(-0.4, 0.4), life: rand(0.15, 0.3), c: 'rgba(63,169,245,.8)' });
+    }
   }
   canvas.addEventListener('pointerdown', e => {
     e.preventDefault();
     if (activeId !== null) return;
     activeId = e.pointerId;
     dragX0 = dragX = e.clientX; dragY0 = e.clientY;
+    pressStartT = performance.now();
     press();
   });
   window.addEventListener('pointermove', e => {
@@ -380,7 +424,8 @@
     abyss:    ['Fell into the gap', 'The jump wasn\'t far enough to reach the next roof.'],
     walkoff:  ['Walked off the edge', 'You didn\'t jump before reaching the end of the roof.'],
     ufo:      ['Knocked out of the sky', 'You bumped into a UFO and fell short of the next roof.'],
-    explosion:['Blown up', 'A UFO laser blast caught you.']
+    explosion:['Blown up', 'You were within 1m of a UFO laser blast.'],
+    laserhit: ['Struck by the laser', 'The UFO laser beam hit you directly.']
   };
   function showDead(){
     const dist = Math.max(0, maxX);
@@ -394,7 +439,7 @@
   }
 
   function onLand(b){
-    grounded = true; P.vx = 0; P.vy = 0; lastRoof = b.h; landT = 0.14; curB = b; walkedOff = false; hitUFO = false;
+    grounded = true; P.vx = 0; P.vy = 0; lastRoof = b.h; landT = 0.14; curB = b; walkedOff = false; hitUFO = false; dashT = 0;
     hitWall = false; bounceCount = 0;   // đáp an toàn lên nóc nhà thì thoát khỏi chuỗi bật tường
     for (let i = 0; i < 9; i++){
       particles.push({ x: P.x, y: P.y + 0.05, fl: P.y, vx: rand(-1.6, 1.6), vy: rand(0.6, 2.2), life: rand(0.25, 0.5) });
@@ -528,10 +573,26 @@
   }
 
   const EXPL_KILL_R = 1;   // bán kính gây chết cố định quanh tâm vụ nổ (m) — không phụ thuộc bán kính hình ảnh 2–5m
+  // Khoảng cách ngắn nhất từ một điểm tới một đoạn thẳng (dùng để biết tia laser có quét trúng nhân vật không).
+  function distToSeg(px, py, x0, y0, x1, y1){
+    const dx = x1 - x0, dy = y1 - y0;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 > 0 ? ((px - x0) * dx + (py - y0) * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (x0 + dx * t), py - (y0 + dy * t));
+  }
+  const BEAM_HIT_R = 0.22;   // bề dày va chạm của tia laser (m), để tính "bị tia bắn trúng trực tiếp"
+
   function updateBlasts(dt){
     for (let i = beams.length - 1; i >= 0; i--){
-      beams[i].t += dt;
-      if (beams[i].t >= beams[i].dur) beams.splice(i, 1);
+      const bm = beams[i];
+      bm.t += dt;
+      // Tia laser đang quét qua: chạm trực tiếp vào tia (không phải vùng nổ) là chết ngay.
+      if (state === 'playing'){
+        const d = distToSeg(P.x, P.y + BODY_H / 2, bm.x0, bm.y0, bm.x1, bm.y1);
+        if (d < HW + BEAM_HIT_R) die('laserhit');
+      }
+      if (bm.t >= bm.dur) beams.splice(i, 1);
     }
     for (let i = explosions.length - 1; i >= 0; i--){
       const e = explosions[i];
@@ -557,6 +618,7 @@
       if (P.vy < 0 && py0 >= top - 0.25){
         // rơi xuống đè lên đĩa bay: đĩa bị hạ và rơi
         u.alive = false; u.vy = -1.5; u.spark = 0;
+        stars += 3; updateStarsHUD('gain');
         u.rotSpeed = (Math.random() < 0.5 ? -1 : 1) * rand(2, 4);
         landT = 0.12;
         ufoSparks(u.x, top, 14, 3.5);
@@ -572,7 +634,7 @@
           P.vy = Math.min(P.vy, -3);
         }
         P.vx *= 0.55;
-        hitUFO = true; wallT = 0.12; u.cool = 0.6; u.shake = 0.35;
+        hitUFO = true; wallT = 0.12; dashT = 0; u.cool = 0.6; u.shake = 0.35;
         ufoSparks(P.x, P.y + BODY_H, 10, 3);
       }
     }
@@ -585,12 +647,14 @@
     const py0 = P.y;
 
     if (state !== 'dead' && !grounded){
-      const res = advance(P, dt);
+      const dashing = dashT > 0;
+      const res = advance(P, dt, dashing ? 0 : 1);
+      if (dashing){ dashT -= dt; if (dashT < 0) dashT = 0; }
       if (P.x > maxX) maxX = P.x;
       if (res){
         if (res.type === 'land') onLand(res.b);
         else if (res.type === 'bounce'){
-          hitWall = true; wallT = 0.12;
+          hitWall = true; wallT = 0.12; dashT = 0;   // va tường cắt ngang dash luôn, trọng lực trở lại bình thường
           spawnWallHit(P.x, P.y, Math.sign(P.vx) || 1);
           if (++bounceCount > MAX_BOUNCES) die('wall');   // an toàn: chặn dội vô hạn giữa hai tường sát nhau
         } else die(hitWall ? 'wall' : hitUFO ? 'ufo' : (walkedOff ? 'walkoff' : res.type));
@@ -759,6 +823,7 @@
     let ky = 1 - 0.38 * c, kx = 1 + 0.25 * c;
     if (landT > 0){ const l = landT / 0.14; ky = 1 - 0.22 * l; kx = 1 + 0.16 * l; }
     else if (wallT > 0){ const l = wallT / 0.12; kx = 1 - 0.3 * l; ky = 1 + 0.2 * l; }
+    else if (dashT > 0){ kx = 1.32; ky = 0.8; }   // kéo dài theo chiều ngang lúc đang dash để thấy rõ tốc độ
     else if (!grounded){ const s = Math.min(0.14, Math.abs(P.vy) / 14 * 0.14); ky = 1 + s; kx = 1 - s * 0.6; }
     else if (grounded && P.vx > 0){ const s = Math.sin(P.x * 9) * 0.05; ky *= 1 + s; kx *= 1 - s * 0.5; }   // lắc nhẹ theo nhịp bước, kết hợp cùng độ nén khi đang tích lực
     const bw = 0.62 * kx * S, bh = 0.74 * ky * S;
@@ -1042,13 +1107,32 @@
   function drawDemo(dt){
     if (!dctx) return;
     demoT += dt;
-    const CYCLE = 4.2, FADE = 0.2;
-    const DRAG0 = 0.3, DRAG1 = 1.5, RELEASE = 1.7, FLIGHT = 0.8, WALK = 30;   // WALK: px/s
+    const CYCLE = 5.6, FADE = 0.2;
+    const DRAG0 = 0.3, DRAG1 = 1.5, RELEASE = 1.7, FLIGHT = 1.5, WALK = 30;   // WALK: px/s
+    const UFO_S = 0.28;           // vị trí UFO trên quỹ đạo (0–1 dọc theo FLIGHT)
+    const DASH_S0 = 0.56, DASH_S1 = 0.66;   // đoạn tap-dash giữa chừng cú bay
+    const DASH_PUSH = 22;         // độ dịch ngang thêm do dash (px, chỉ mang tính minh hoạ)
     const t = demoT % CYCLE;
     const W = 300, H = 120, baseY = 92;
     const leftX0 = 20, leftX1 = 100, rightX0 = 200, rightX1 = 280;
-    const startX = leftX0 + 14, landX = rightX0 + 20;
+    const startX = leftX0 + 14, landX = rightX0 + 20, landX0 = landX - DASH_PUSH;
     const ease = x => x * x * (3 - 2 * x);
+    const arcY = s => Math.sin(Math.PI * s) * 46;
+    const releaseX = startX + WALK * RELEASE;
+    const basePx = s => releaseX + (landX0 - releaseX) * s;
+
+    // vị trí thực trên quỹ đạo bay, có một đoạn "khựng ngang" ở giữa mô phỏng cú dash
+    function flightPos(s){
+      if (s <= DASH_S0) return [basePx(s), arcY(s)];
+      if (s <= DASH_S1){
+        const y0 = arcY(DASH_S0), u = (s - DASH_S0) / (DASH_S1 - DASH_S0);
+        const xA = basePx(DASH_S0), xB = basePx(DASH_S1) + DASH_PUSH;
+        return [xA + (xB - xA) * u, y0];
+      }
+      const xA = basePx(DASH_S1) + DASH_PUSH, xB = landX;
+      const u = (s - DASH_S1) / (1 - DASH_S1);
+      return [xA + (xB - xA) * u, arcY(s)];
+    }
 
     dctx.clearRect(0, 0, W, H);
     let alpha = 1;
@@ -1066,15 +1150,15 @@
     dctx.fillRect(leftX1, baseY, rightX0 - leftX1, 2);
 
     // vị trí nhân vật theo từng giai đoạn
-    const releaseX = startX + WALK * RELEASE;
-    let px, py = 0, squash = 0, L = 0, dragging = false, flying = false;
+    let px, py = 0, squash = 0, L = 0, dragging = false, flying = false, dashing = false;
     if (t < RELEASE){
       px = startX + WALK * t;
       dragging = t >= DRAG0;
       L = ease(Math.min(1, Math.max(0, (t - DRAG0) / (DRAG1 - DRAG0))));
     } else if (t < RELEASE + FLIGHT){
       const s = (t - RELEASE) / FLIGHT;
-      px = releaseX + (landX - releaseX) * s; py = Math.sin(Math.PI * s) * 46; flying = true;
+      const p = flightPos(s); px = p[0]; py = p[1]; flying = true;
+      dashing = s > DASH_S0 && s < DASH_S1;
     } else {
       const tl = t - RELEASE - FLIGHT;
       px = landX + WALK * tl;
@@ -1096,8 +1180,9 @@
       // đoạn gợi ý quỹ đạo ngắn phía trước nhân vật (giống trong game)
       dctx.fillStyle = 'rgba(63,169,245,.75)';
       for (let i = 1; i <= 6; i++){
-        const s = i * 0.04;
-        dctx.beginPath(); dctx.arc(px + (landX - px) * s, baseY - 9 - Math.sin(Math.PI * s) * 46, 1.8, 0, Math.PI * 2); dctx.fill();
+        const s = i * 0.03;
+        const p = flightPos(s);
+        dctx.beginPath(); dctx.arc(px + p[0] - basePx(0), baseY - 9 - p[1], 1.8, 0, Math.PI * 2); dctx.fill();
       }
     }
 
@@ -1105,16 +1190,48 @@
     if (flying){
       dctx.fillStyle = 'rgba(63,169,245,.35)';
       const cur = (t - RELEASE) / FLIGHT;
-      for (let i = 0; i <= 10; i++){
-        const s = i / 10; if (s > cur) break;
-        dctx.beginPath(); dctx.arc(releaseX + (landX - releaseX) * s, baseY - 9 - Math.sin(Math.PI * s) * 46, 2, 0, Math.PI * 2); dctx.fill();
+      for (let i = 0; i <= 14; i++){
+        const s = i / 14; if (s > cur) break;
+        const p = flightPos(s);
+        dctx.beginPath(); dctx.arc(p[0], baseY - 9 - p[1], 2, 0, Math.PI * 2); dctx.fill();
       }
     }
 
-    // nhân vật: nén nhẹ khi tích lực, lắc nhẹ khi đi bộ, nén khi đáp
+    // UFO giữa chừng cú bay: còn nguyên cho tới khi nhân vật đè lên, rồi nổ + hiện "+3" sao bay lên
+    const ufoP = flightPos(UFO_S), ufoX = ufoP[0], ufoY = baseY - 9 - ufoP[1] - 15;
+    const stompT = RELEASE + FLIGHT * UFO_S, popAge = t - stompT, popDur = 0.6;
+    if (popAge < 0){
+      dctx.save(); dctx.translate(ufoX, ufoY);
+      dctx.fillStyle = '#17232b'; dctx.beginPath(); dctx.ellipse(0, 3, 14, 4, 0, 0, Math.PI * 2); dctx.fill();
+      dctx.fillStyle = '#3d5a82'; dctx.beginPath(); dctx.ellipse(0, 0, 13, 5, 0, 0, Math.PI * 2); dctx.fill();
+      dctx.fillStyle = '#6e98a6'; dctx.beginPath(); dctx.ellipse(0, -4, 6.5, 6, 0, Math.PI, 0); dctx.fill();
+      dctx.fillStyle = 'rgba(127,230,232,.9)';
+      dctx.beginPath(); dctx.arc(-8, 0, 1.1, 0, Math.PI * 2); dctx.arc(0, 1, 1.1, 0, Math.PI * 2); dctx.arc(8, 0, 1.1, 0, Math.PI * 2); dctx.fill();
+      dctx.restore();
+    } else if (popAge < popDur){
+      const k = popAge / popDur;
+      dctx.save(); dctx.globalAlpha *= (1 - k);
+      dctx.strokeStyle = 'rgba(255,214,102,.9)'; dctx.lineWidth = 2;
+      dctx.beginPath(); dctx.arc(ufoX, ufoY, 6 + k * 16, 0, Math.PI * 2); dctx.stroke();
+      dctx.fillStyle = '#ffd166'; dctx.font = '700 13px ui-monospace, monospace'; dctx.textAlign = 'center';
+      dctx.fillText('★+3', ufoX, ufoY - 8 - k * 20);
+      dctx.restore();
+    }
+
+    // vòng gợn "tap" lúc kích hoạt dash giữa chừng
+    if (dashing){
+      const s = (t - RELEASE) / FLIGHT, u = (s - DASH_S0) / (DASH_S1 - DASH_S0);
+      dctx.save(); dctx.globalAlpha *= (1 - u) * 0.9;
+      dctx.strokeStyle = '#fff'; dctx.lineWidth = 1.6;
+      dctx.beginPath(); dctx.arc(px, baseY - 9 - py, 4 + u * 10, 0, Math.PI * 2); dctx.stroke();
+      dctx.restore();
+    }
+
+    // nhân vật: nén nhẹ khi tích lực, lắc nhẹ khi đi bộ, kéo dài khi dash, nén khi đáp
     let ky = 1, kx = 1;
     if (dragging){ ky = 1 - 0.25 * L; kx = 1 + 0.15 * L; }
     if (!flying){ const bob = Math.sin(px * 0.35) * 0.05; ky *= 1 + bob; kx *= 1 - bob * 0.5; }
+    if (dashing){ kx = 1.3; ky = 0.82; }
     if (squash){ ky *= 1 - 0.3 * squash; kx *= 1 + 0.22 * squash; }
     const cy = baseY - py - 9 * ky;
     dctx.fillStyle = '#3fa9f5'; dctx.strokeStyle = '#e7edf5'; dctx.lineWidth = 1.6;
