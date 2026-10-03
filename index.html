@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0b1220">
-<title>Rooftop Leap – 79° Physics</title>
+<title>Rooftop Leap V3.0</title>
 <style>
   :root{
     --paper:#0b1220;
@@ -88,13 +88,14 @@
 
 <div class="ov" id="ov">
   <div class="card">
-    <h1 id="ovTitle">Rooftop Leap</h1>
+    <h1 id="ovTitle">Rooftop Leap V3.0</h1>
     <p id="ovMsg">Drag right to charge, release to jump. You keep walking, so jump before the roof ends.</p>
     <div id="ovBody">
       <canvas id="demo" width="300" height="120"></canvas>
       <div class="demoCaption"><span>Drag</span>→<span>Release</span>→<span>Land</span></div>
       <div class="demoNote">Start with 3 stars. Land on a UFO for +3. Quick-tap mid-air to dash 0.5m (costs 1 star). Walls, UFO bumps, and lasers knock you down — a blinking UFO is about to fire.</div>
     </div>
+    <button id="start">Start</button>
     <button id="again" hidden>Play again</button>
 
   </div>
@@ -145,7 +146,7 @@
   const demoCanvas = $('demo'), dctx = demoCanvas ? demoCanvas.getContext('2d') : null;
   const elDist = $('dist'), elBest = $('best'), elFill = $('fill'), elRead = $('readout');
   const elStars = $('stars'), elStarCount = $('starCount');
-  const ov = $('ov'), ovTitle = $('ovTitle'), ovMsg = $('ovMsg'), ovBody = $('ovBody'), btnAgain = $('again');
+  const ov = $('ov'), ovTitle = $('ovTitle'), ovMsg = $('ovMsg'), ovBody = $('ovBody'), btnAgain = $('again'), btnStart = $('start');
 
   let best = 0;
   try { best = parseFloat(localStorage.getItem('rooftopleap_best')) || 0; } catch (e) {}
@@ -160,6 +161,7 @@
   let hitWall = false, bounceCount = 0;
   let stars = 3;   // sao: bắt đầu có 3, +3 mỗi lần đè UFO, -1 mỗi lần dash
   let demoT = 0;
+  let skyT = 0;   // đồng hồ riêng cho hiệu ứng bầu trời (sao lấp lánh...), chạy liên tục bất kể trạng thái chơi
   let curB = null;               // toà nhà nhân vật đang đứng/đi bộ trên đó
   const WALK_SPEED = 3.0;        // m/s — tốc độ đi bộ trên mái nhà
   let walkedOff = false;         // rơi do đi bộ hết mép (để phân biệt lý do thua với nhảy hụt)
@@ -245,11 +247,17 @@
     particles = [];
     camX = P.x - viewW * 0.28; camY = P.y;
     state = 'ready'; deadReason = '';
-    ov.hidden = false; btnAgain.hidden = true;
-    ovTitle.textContent = 'Rooftop Leap';
+    ov.hidden = false; btnAgain.hidden = true; btnStart.hidden = false;
+    ovTitle.textContent = 'Rooftop Leap V3.0';
     ovMsg.textContent = 'Drag right to charge, release to jump. You keep walking, so jump before the roof ends.';
     ovBody.hidden = false;
   }
+  // Nút Start: chỉ đơn giản gỡ màn hình chờ và cho phép chơi; chạm/kéo thẳng vào màn hình cũng
+  // vẫn bắt đầu được như trước (xem press()), nút này chỉ là lối vào rõ ràng hơn cho người mới.
+  btnStart.addEventListener('click', () => {
+    if (state !== 'ready') return;
+    state = 'playing'; ov.hidden = true;
+  });
 
   /* ---------- Vật lý bay + va chạm (dùng chung cho game và đường dự đoán) ---------- */
   const CRATER_DEPTH_FRAC = 0.45;   // hố lõm sâu tối đa = bán kính hố × tỉ lệ này (m)
@@ -431,10 +439,11 @@
     const dist = Math.max(0, maxX);
     const r = REASONS[deadReason] || REASONS.abyss;
     ov.hidden = false;
-    ovTitle.textContent = r[0];
-    ovMsg.innerHTML = '<div style="margin-bottom:8px">' + r[1] + '</div><div class="stats">Distance: <b>' +
+    ovTitle.textContent = 'End Game';
+    ovMsg.innerHTML = '<div style="margin-bottom:8px"><b>' + r[0] + '</b> — ' + r[1] + '</div><div class="stats">Distance: <b>' +
       fmt(dist) + ' m</b><br>Best: <b>' + fmt(best) + ' m</b></div>';
     ovBody.hidden = true;
+    btnStart.hidden = true;
     btnAgain.hidden = false;
   }
 
@@ -616,12 +625,18 @@
       if (P.y >= top || P.y + BODY_H <= bot) continue;
 
       if (P.vy < 0 && py0 >= top - 0.25){
-        // rơi xuống đè lên đĩa bay: đĩa bị hạ và rơi
-        u.alive = false; u.vy = -1.5; u.spark = 0;
+        // rơi xuống đè lên đĩa bay: đĩa bị hạ và rơi, luôn được +3 sao
+        u.alive = false; u.vy = -1.5; u.spark = 0;   // đĩa luôn rơi xuống, bất kể nhân vật có bật lên tiếp hay không
         stars += 3; updateStarsHUD('gain');
         u.rotSpeed = (Math.random() < 0.5 ? -1 : 1) * rand(2, 4);
-        landT = 0.12;
+        landT = 0.12;   // dùng lại đúng hiệu ứng nén người lúc đáp, dù có bật lên tiếp hay không
         ufoSparks(u.x, top, 14, 3.5);
+        dashT = 0;   // huỷ dash dở dang nếu có, ưu tiên cú nhảy mới từ UFO
+        if (charging){          // đã tích lực sẵn: bật lên ngay từ đúng vị trí UFO, y hệt đáp mái nhà
+          const h = hold; charging = false; hold = 0; pending = null; launch(h);
+        } else if (pending !== null){   // đã chốt lực từ trước lúc còn bay
+          const h = pending; pending = null; launch(h);
+        }   // chưa tích lực: giữ nguyên hành vi cũ, nhân vật rơi tiếp qua đĩa như bình thường
       } else if (u.cool <= 0){
         // đâm đầu (từ dưới) hoặc va bên hông: nhân vật bị hất rơi xuống
         const fromBelow = P.vy > 0 && py0 + BODY_H <= bot + 0.3;
@@ -683,17 +698,108 @@
   const sx = x => (x - camX) * S + shX;
   const sy = y => anchorY - (y - camY) * S + shY;
 
+  /* ---------- Trang trí bầu trời: gradient, sao, trăng, skyline xa (parallax), mây ---------- */
+  function hash01(a, b){
+    let h = (a * 374761393 + b * 668265263) | 0;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+
+  function drawSky(){
+    const g = ctx.createLinearGradient(0, 0, 0, anchorY);
+    g.addColorStop(0, '#060a12');
+    g.addColorStop(0.6, '#0a1220');
+    g.addColorStop(1, '#131f30');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, anchorY);
+    ctx.fillStyle = COL.paper; ctx.fillRect(0, anchorY, W, H - anchorY);
+  }
+
+  function drawStars(){
+    // Sao gắn theo lưới thế giới (trôi chậm theo camX·0.05 = parallax xa) để không "dính" cố định trên màn hình.
+    const px = camX * 0.05, cell = 0.9;
+    const i0 = Math.floor((px) / cell) - 1, i1 = Math.ceil((px + viewW) / cell) + 1;
+    for (let i = i0; i <= i1; i++){
+      for (let j = 0; j < 7; j++){
+        const r1 = hash01(i, j * 31 + 1), r2 = hash01(i, j * 31 + 2), r3 = hash01(i, j * 31 + 3);
+        if (r3 > 0.55) continue;   // chỉ khoảng 45% ô có sao, tránh dày đặc
+        const X = (i + r1 * 0.9 - px) * cell * S;
+        if (X < -10 || X > W + 10) continue;
+        const Y = (j / 7 + r2 * 0.1) * anchorY * 0.82;
+        const tw = 0.55 + 0.45 * Math.sin(skyT * (1.2 + r2 * 2) + i * 12.9 + j * 7.3);
+        const rad = 0.6 + r1 * 1.3;
+        ctx.globalAlpha = Math.max(0, tw);
+        ctx.fillStyle = r2 > 0.8 ? '#cfe8ff' : '#e7edf5';
+        ctx.beginPath(); ctx.arc(X, Y, rad, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawMoon(){
+    const px = camX * 0.08 * S;   // trôi rất chậm, xa nhất trong các lớp parallax
+    const period = W + 300;
+    const X = (((40 * S - px) % period) + period) % period - 150;
+    const Y = anchorY * 0.26;
+    const R = Math.max(16, 0.42 * S);
+    const glow = ctx.createRadialGradient(X, Y, 0, X, Y, R * 3.2);
+    glow.addColorStop(0, 'rgba(160,180,255,.22)');
+    glow.addColorStop(1, 'rgba(160,180,255,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(X, Y, R * 3.2, 0, Math.PI * 2); ctx.fill();
+    const mg = ctx.createRadialGradient(X - R * 0.3, Y - R * 0.3, R * 0.1, X, Y, R);
+    mg.addColorStop(0, '#eef3ff'); mg.addColorStop(1, '#a9b9e8');
+    ctx.fillStyle = mg; ctx.beginPath(); ctx.arc(X, Y, R, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(130,145,190,.35)';
+    ctx.beginPath(); ctx.arc(X - R * 0.32, Y + R * 0.22, R * 0.22, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(X + R * 0.28, Y - R * 0.18, R * 0.14, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawFarSkyline(){
+    // Dải toà nhà xa làm nền, cuộn chậm hơn lớp chính (parallax 0.35), tạo chiều sâu đô thị.
+    const par = 0.35, px = camX * par;
+    const cell = 3.2;
+    const i0 = Math.floor(px / cell) - 1, i1 = Math.ceil((px + viewW / par) / cell) + 1;
+    const baseY = anchorY;
+    ctx.fillStyle = 'rgba(18,28,42,.75)';
+    for (let i = i0; i <= i1; i++){
+      const rh = 0.25 + hash01(i, 99) * 0.5;
+      const w = cell * (0.55 + hash01(i, 55) * 0.35);
+      const x0 = (i * cell - px) * S;
+      const h = rh * anchorY * 0.6;
+      ctx.fillRect(x0, baseY - h, w * S, h);
+    }
+  }
+
+  function drawClouds(){
+    const par = 0.5, px = camX * par;
+    const cell = 7;
+    const i0 = Math.floor(px / cell) - 1, i1 = Math.ceil((px + viewW / par) / cell) + 1;
+    for (let i = i0; i <= i1; i++){
+      const r1 = hash01(i, 1), r2 = hash01(i, 2);
+      if (r1 > 0.6) continue;   // không phải ô nào cũng có mây
+      const x0 = (i * cell + r1 * 2 - px) * S;
+      const y0 = anchorY * (0.12 + r2 * 0.35);
+      const w = (2.4 + r1 * 2.2) * S, h = w * 0.26;
+      ctx.fillStyle = 'rgba(180,195,220,.09)';
+      ctx.beginPath();
+      ctx.ellipse(x0, y0, w * 0.5, h * 0.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(x0 + w * 0.3, y0 + h * 0.12, w * 0.32, h * 0.4, 0, 0, Math.PI * 2);
+      ctx.ellipse(x0 - w * 0.28, y0 + h * 0.08, w * 0.3, h * 0.38, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   function drawGrid(){
+    // Lưới làm nhẹ đi, chỉ còn thấp thoáng — vẫn đủ để đọc khoảng cách/độ cao nhưng không lấn át bầu trời.
     const x0 = Math.floor(camX) - 1, x1 = Math.ceil(camX + viewW) + 1;
     ctx.lineWidth = 1;
     for (let m = x0; m <= x1; m++){
-      ctx.strokeStyle = m % 5 === 0 ? 'rgba(231,237,245,.14)' : 'rgba(231,237,245,.05)';
+      ctx.strokeStyle = m % 5 === 0 ? 'rgba(231,237,245,.07)' : 'rgba(231,237,245,.022)';
       const X = Math.round(sx(m)) + .5;
       ctx.beginPath(); ctx.moveTo(X, 0); ctx.lineTo(X, H); ctx.stroke();
     }
     const yTop = camY + anchorY / S, yBot = camY - (H - anchorY) / S;
     for (let m = Math.floor(yBot); m <= Math.ceil(yTop); m++){
-      ctx.strokeStyle = m % 5 === 0 ? 'rgba(231,237,245,.14)' : 'rgba(231,237,245,.05)';
+      ctx.strokeStyle = m % 5 === 0 ? 'rgba(231,237,245,.09)' : 'rgba(231,237,245,.03)';
       const Y = Math.round(sy(m)) + .5;
       ctx.beginPath(); ctx.moveTo(0, Y); ctx.lineTo(W, Y); ctx.stroke();
     }
@@ -1053,7 +1159,11 @@
 
   function render(){
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = COL.paper; ctx.fillRect(0, 0, W, H);
+    drawSky();
+    drawStars();
+    drawMoon();
+    drawFarSkyline();
+    drawClouds();
     drawGrid();
     drawBuildings();
     drawUfos();
@@ -1247,6 +1357,7 @@
   function frame(ts){
     const dt = Math.min(0.05, (ts - lastTime) / 1000 || 0);
     lastTime = ts;
+    skyT += dt;
     acc += dt;
     while (acc >= DT){ step(DT); acc -= DT; }
 
