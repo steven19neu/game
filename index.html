@@ -93,7 +93,7 @@
     <div id="ovBody">
       <canvas id="demo" width="300" height="120"></canvas>
       <div class="demoCaption"><span>Drag</span>→<span>Release</span>→<span>Land</span></div>
-      <div class="demoNote">Start with 3 stars. Land on a UFO for +3. Quick-tap mid-air to dash 0.5m (costs 1 star). Walls, UFO bumps, and lasers knock you down — a blinking UFO is about to fire.</div>
+      <div class="demoNote">Start with 3 stars. Land on a UFO for +3. Quick-tap mid-air to dash 0.5m (costs 1 star). Walls, UFO bumps, and lasers knock you down. Drones just knock you off course, and gusts of wind bend your jump — watch the warnings.</div>
     </div>
     <button id="start">Start</button>
     <button id="again" hidden>Play again</button>
@@ -167,8 +167,15 @@
   let walkedOff = false;         // rơi do đi bộ hết mép (để phân biệt lý do thua với nhảy hụt)
   let hitUFO = false;            // rơi do đâm đầu vào đĩa bay
   let activeId = null, keyMode = false, dragX0 = 0, dragY0 = 0, dragX = 0, pressStartT = 0;
+  let inputLockUntil = 0;   // khoá nhận input trên canvas một nhịp ngắn ngay sau khi bấm nút overlay,
+                             // để cú chạm vào nút (Start/Play again) không bị "rò" xuống thành thao tác chơi
   let dashT = 0;   // thời gian dash ngang còn lại (s); >0 nghĩa là đang dash
   let buildings, bid, particles, ufos, uid = 0, lastTime = 0, acc = 0;
+  let drones, did = 0;                 // chướng ngại mới: drone tuần tra ngang, chỉ đẩy lệch chứ không giết
+  const DRONE_HW = 0.85, DRONE_HH = 0.3, DRONE_BUMP_COOL = 0.55;
+  let wind = { phase: 'idle', t: 0, warnDur: 2.0, dur: 0, ax: 0, dir: 1, strength: 0 };
+  let windTimer = 7;                   // giây tới đợt gió đầu tiên
+  const WIND_GAP_MIN = 6, WIND_GAP_MAX = 12;
   let beams = [], explosions = [], shX = 0, shY = 0, shakeT = 0, shakeAmp = 0;   // laser, vụ nổ, rung màn hình
 
   const COL = {
@@ -229,6 +236,17 @@
           id: uid++
         });
       }
+
+      // drone tuần tra ngang qua bầu trời: chướng ngại nhẹ, chỉ đẩy lệch quỹ đạo chứ không giết
+      if (Math.random() < 0.13){
+        const dy = Math.max(prevH, h) + rand(2.5, 7);
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        drones.push({
+          x: d + rand(0, gap + w), y: dy, by: dy,
+          vx: dir * rand(2.2, 3.4), r: 1, cool: 0, t: rand(0, 6), bumpT: 0,
+          id: did++
+        });
+      }
     }
   }
 
@@ -236,6 +254,9 @@
     bid = 0; uid = 0;
     buildings = [{ x0: -12, x1: 5, h: 6, id: bid++ }];
     ufos = []; beams = []; explosions = []; shakeT = 0; shX = shY = 0;
+    drones = []; did = 0;
+    wind = { phase: 'idle', t: 0, warnDur: 2.0, dur: 0, ax: 0, dir: 1, strength: 0 };
+    windTimer = rand(5, 8);
     genAhead(0);
     P = { x: 0, y: 6, vx: 0, vy: 0 };
     lastRoof = 6; curB = buildings[0];
@@ -257,6 +278,8 @@
   btnStart.addEventListener('click', () => {
     if (state !== 'ready') return;
     state = 'playing'; ov.hidden = true;
+    inputLockUntil = performance.now() + 250;
+    if (grounded) P.vx = WALK_SPEED;   // bấm Start là đi bộ ngay, giống như vừa đáp xong một cú nhảy
   });
 
   /* ---------- Vật lý bay + va chạm (dùng chung cho game và đường dự đoán) ---------- */
@@ -386,6 +409,7 @@
   canvas.addEventListener('pointerdown', e => {
     e.preventDefault();
     if (activeId !== null) return;
+    if (performance.now() < inputLockUntil) return;   // vừa bấm nút overlay xong, bỏ qua input rò xuống canvas
     activeId = e.pointerId;
     dragX0 = dragX = e.clientX; dragY0 = e.clientY;
     pressStartT = performance.now();
@@ -414,7 +438,7 @@
     }
   });
   window.addEventListener('keyup', e => { if (e.code === 'Space' && keyMode) release(); });
-  btnAgain.addEventListener('click', reset);
+  btnAgain.addEventListener('click', () => { reset(); inputLockUntil = performance.now() + 250; });
   window.addEventListener('resize', resize);
 
   /* ---------- Cập nhật ---------- */
@@ -655,6 +679,60 @@
     }
   }
 
+  /* ---------- Drone: chướng ngại nhẹ, chỉ đẩy lệch quỹ đạo chứ không bao giờ giết ---------- */
+  function spawnDroneBump(x, y, dir){
+    for (let i = 0; i < 8; i++){
+      particles.push({ x, y, fl: -1e9, vx: dir * rand(0.8, 2.4) * -1, vy: rand(0.4, 2),
+        life: rand(0.2, 0.4), c: 'rgba(231,237,245,.8)' });
+    }
+  }
+
+  function updateDrones(dt){
+    for (let i = drones.length - 1; i >= 0; i--){
+      const d = drones[i];
+      d.t += dt; if (d.cool > 0) d.cool -= dt; if (d.bumpT > 0) d.bumpT -= dt;
+      d.x += d.vx * dt;
+      d.y = d.by + Math.sin(d.t * 2.2) * 0.3;
+      if (d.x < camX - 25 || d.x > camX + viewW + 25) drones.splice(i, 1);
+    }
+  }
+
+  function checkDrones(){
+    if (state !== 'playing' || grounded) return;
+    for (const d of drones){
+      if (d.cool > 0) continue;
+      if (Math.abs(P.x - d.x) >= HW + DRONE_HW) continue;
+      if (P.y >= d.y + DRONE_HH || P.y + BODY_H <= d.y - DRONE_HH) continue;
+      // va chạm nhẹ: đẩy lệch vận tốc ngẫu nhiên, không bao giờ giết — buộc người chơi phải điều chỉnh tiếp
+      const dir = P.x < d.x ? -1 : 1;
+      P.vx = P.vx * 0.55 + dir * rand(1.1, 2.2);
+      P.vy += rand(-1.6, 1.6);
+      d.cool = DRONE_BUMP_COOL; d.bumpT = 0.14;
+      wallT = 0.1;   // dùng lại hiệu ứng nén nhẹ cho nhân vật, không gắn với lý do thua "wall"
+      spawnDroneBump(P.x, P.y + BODY_H / 2, dir);
+    }
+  }
+
+  /* ---------- Gió giật: làm lệch quỹ đạo nhảy trong một khoảng thời gian, có cảnh báo trước ---------- */
+  function updateWind(dt){
+    if (state !== 'playing') return;
+    if (wind.phase === 'idle'){
+      windTimer -= dt;
+      if (windTimer <= 0){
+        wind.phase = 'warn'; wind.t = 0;
+        wind.dir = Math.random() < 0.5 ? -1 : 1;
+        wind.strength = rand(1.1, 2.3);
+        wind.dur = rand(1.6, 2.6);
+      }
+    } else if (wind.phase === 'warn'){
+      wind.t += dt;
+      if (wind.t >= wind.warnDur){ wind.phase = 'active'; wind.t = 0; wind.ax = wind.dir * wind.strength; }
+    } else if (wind.phase === 'active'){
+      wind.t += dt;
+      if (wind.t >= wind.dur){ wind.phase = 'idle'; wind.ax = 0; windTimer = rand(WIND_GAP_MIN, WIND_GAP_MAX); }
+    }
+  }
+
   function step(dt){
     if (charging && keyMode) hold = Math.min(T_MAX, hold + dt);
     if (landT > 0) landT = Math.max(0, landT - dt);
@@ -663,6 +741,7 @@
 
     if (state !== 'dead' && !grounded){
       const dashing = dashT > 0;
+      if (wind.phase === 'active' && !dashing) P.vx += wind.ax * dt;   // gió giật làm lệch quỹ đạo đang bay
       const res = advance(P, dt, dashing ? 0 : 1);
       if (dashing){ dashT -= dt; if (dashT < 0) dashT = 0; }
       if (P.x > maxX) maxX = P.x;
@@ -685,6 +764,9 @@
       }
     }
     if (state === 'playing' && !grounded) checkUfos(py0);
+    if (state === 'playing' && !grounded) checkDrones();
+    updateDrones(dt);
+    updateWind(dt);
     if (state !== 'ready') updateUfos(dt);
     updateBlasts(dt);
     for (let i = particles.length - 1; i >= 0; i--){
@@ -1050,6 +1132,84 @@
     }
   }
 
+  // Drone nhỏ gọn: thân tối, 4 cánh quạt mờ chuyển động, một đèn đỏ chớp để dễ nhận biết trên nền lạnh.
+  function drawDrone(d){
+    const X = sx(d.x), Y = sy(d.y);
+    const k = 1 - (d.bumpT > 0 ? d.bumpT / 0.14 * 0.4 : 0);
+    const s = 13 * k, dir = d.vx < 0 ? -1 : 1;
+    ctx.save();
+    ctx.translate(X, Y); ctx.scale(dir, 1);
+    const blink = Math.sin(d.t * 9) > 0.3;
+    // 4 cánh quạt (vệt mờ xoay nhanh)
+    ctx.fillStyle = 'rgba(180,195,215,.4)';
+    for (const [ox, oy] of [[-s, -s * 0.5], [s, -s * 0.5], [-s, s * 0.5], [s, s * 0.5]]){
+      ctx.beginPath(); ctx.ellipse(ox, oy, s * 0.62, s * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    // tay đỡ
+    ctx.strokeStyle = '#0a0e14'; ctx.lineWidth = Math.max(1, s * 0.12);
+    ctx.beginPath();
+    ctx.moveTo(-s, -s * 0.5); ctx.lineTo(-s * 0.35, 0); ctx.lineTo(s * 0.35, 0); ctx.lineTo(s, -s * 0.5);
+    ctx.moveTo(-s, s * 0.5); ctx.lineTo(-s * 0.35, 0); ctx.lineTo(s * 0.35, 0); ctx.lineTo(s, s * 0.5);
+    ctx.stroke();
+    // thân
+    ctx.fillStyle = '#17232b'; ctx.strokeStyle = '#04070a'; ctx.lineWidth = Math.max(1, s * 0.1);
+    ctx.beginPath(); ctx.ellipse(0, 0, s * 0.42, s * 0.26, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    // đèn chớp
+    ctx.fillStyle = blink ? '#ff6a5a' : 'rgba(255,106,90,.25)';
+    if (blink){ ctx.shadowColor = '#ff6a5a'; ctx.shadowBlur = 5; }
+    ctx.beginPath(); ctx.arc(s * 0.3, 0, s * 0.09, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  function drawDrones(){
+    for (const d of drones){
+      const X = sx(d.x);
+      if (X < -40 || X > W + 40) continue;
+      drawDrone(d);
+    }
+  }
+
+  /* ---------- Hiệu ứng gió: cảnh báo trước + vệt gió khi đang thổi, vẽ cố định theo màn hình ---------- */
+  function drawWindFX(){
+    if (wind.phase === 'idle') return;
+    const warn = wind.phase === 'warn';
+    const k = warn ? wind.t / wind.warnDur : 1;
+    const alpha = warn ? 0.25 + 0.5 * Math.abs(Math.sin(wind.t * 10)) : 0.55;
+    const dir = wind.dir;
+    const cy = 215;   // đặt dưới khối HUD (điểm số/thanh lực) để không đè chữ
+
+    // chỉ báo hướng/độ mạnh cố định trên đầu màn hình
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = '700 12px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = dir > 0 ? 'left' : 'right';
+    ctx.fillStyle = '#e7edf5';
+    ctx.fillText('WIND', dir > 0 ? W - 88 : 88, cy - 10);
+    const bx = dir > 0 ? W - 90 : 90;
+    for (let i = 0; i < 3; i++){
+      const o = (i * 10 + (warn ? 0 : (skyT * 40) % 10)) * dir;
+      ctx.strokeStyle = '#3fa9f5'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(bx + o, cy); ctx.lineTo(bx + o + dir * 14, cy);
+      ctx.lineTo(bx + o + dir * 9, cy - 4); ctx.moveTo(bx + o + dir * 14, cy); ctx.lineTo(bx + o + dir * 9, cy + 4);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // vệt gió quét ngang toàn màn hình lúc đang thổi mạnh
+    if (!warn){
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      ctx.strokeStyle = '#cfe8ff'; ctx.lineWidth = 1.4; ctx.lineCap = 'round';
+      for (let i = 0; i < 10; i++){
+        const yy = (i * 97 + skyT * 220 * dir) % (H + 60) - 30;
+        const xo = ((i * 53) % W);
+        ctx.beginPath(); ctx.moveTo(xo, yy); ctx.lineTo(xo + dir * 46, yy + 10);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
   // Điểm ngắm dự kiến của laser trong lúc UFO đang nhấp nháy cảnh báo: hiện đúng vị trí (và phạm vi
   // nổ) sẽ bị bắn trúng, nhấp nháy cùng nhịp với đèn cảnh báo trên UFO để người chơi kịp né.
   function drawAimPoint(u){
@@ -1151,6 +1311,7 @@
     drawGrid();
     drawBuildings();
     drawUfos();
+    drawDrones();
     drawBlasts();
 
     // gợi ý bay: chỉ một đoạn ngắn, một màu duy nhất, không lộ kết quả trước
@@ -1178,6 +1339,7 @@
     drawParticles();
     drawPlayer();
     if (charging && !keyMode) drawDragLine();
+    drawWindFX();
 
     // HUD
     elDist.textContent = fmt(Math.max(0, maxX));
